@@ -1,0 +1,32 @@
+# Rust
+target/
+Cargo.lock.bak
+*.pdb
+
+# WASM build output
+engine/pkg/
+web/src/wasm/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Server
+server/*.db
+server/*.db-shm
+server/*.db-wal
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# iOS
+host-ios/build/
+*.xcuserdata/

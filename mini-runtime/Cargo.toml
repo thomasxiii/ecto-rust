@@ -1,0 +1,17 @@
+[package]
+name = "mini-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Ecto mini-runtime: graph-as-source-of-truth reactive UI prototype"
+
+[dependencies]
+serde.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "toggle"
+path = "examples/toggle.rs"

@@ -1,0 +1,22 @@
+{
+  "name": "ecto-rust",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "web",
+    "server"
+  ],
+  "scripts": {
+    "wasm:build": "wasm-pack build engine --target web --out-dir ../web/src/wasm --out-name ecto_engine",
+    "wasm:build:dev": "wasm-pack build engine --dev --target web --out-dir ../web/src/wasm --out-name ecto_engine",
+    "dev": "npm run wasm:build:dev && concurrently -n server,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run wasm:build && npm run build -w server && npm run build -w web",
+    "test:engine": "cargo test --manifest-path engine/Cargo.toml",
+    "reset-db": "rm -f server/ecto.db server/ecto.db-shm server/ecto.db-wal && echo 'db cleared'"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "typescript": "^5.6.3"
+  }
+}
