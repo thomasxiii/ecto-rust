@@ -231,11 +231,44 @@ impl MiniRuntime {
         to_json(&snap)
     }
 
-    /// Dispatch a UI event. Returns a JSON array of patches.
+    /// Dispatch a payload-less UI event (`click`, `submit`, etc).
+    /// Returns a JSON array of patches.
     #[wasm_bindgen(js_name = handleEvent)]
     pub fn handle_event(&self, element: &str, event: &str) -> Result<String, JsValue> {
         let patches = self.inner.borrow_mut().handle_event(element, event);
         to_json(&patches)
+    }
+
+    /// Dispatch an event with a payload (typically a `change` event from an
+    /// input — the payload should be a JSON value, e.g. `"\"hello\""`).
+    #[wasm_bindgen(js_name = dispatchEvent)]
+    pub fn dispatch_event(
+        &self,
+        element: &str,
+        event: &str,
+        payload_json: &str,
+    ) -> Result<String, JsValue> {
+        let payload: Option<mini_runtime::Value> = if payload_json.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_str(payload_json).map_err(map_err("invalid payload"))?)
+        };
+        let patches = self
+            .inner
+            .borrow_mut()
+            .dispatch_event(element, event, payload);
+        to_json(&patches)
+    }
+
+    /// Replace the runtime's graph with a JSON payload (nodes + edges
+    /// matching the mini-runtime wire format). Used to load LLM-generated
+    /// apps without rebuilding the WASM instance.
+    #[wasm_bindgen(js_name = loadGraph)]
+    pub fn load_graph(&self, payload_json: &str) -> Result<(), JsValue> {
+        let payload: mini_runtime::graph::GraphPayload =
+            serde_json::from_str(payload_json).map_err(map_err("invalid graph payload"))?;
+        self.inner.borrow_mut().load_payload(payload);
+        Ok(())
     }
 
     /// Cypher-like dump of the whole graph + live runtime state. Returns
@@ -243,6 +276,14 @@ impl MiniRuntime {
     #[wasm_bindgen(js_name = cypherDump)]
     pub fn cypher_dump(&self) -> String {
         self.inner.borrow().cypher_dump()
+    }
+
+    /// JSON-stringified `GraphPayload` of the current runtime graph. Useful
+    /// for the host to inspect, persist, or send to a server.
+    #[wasm_bindgen(js_name = graphPayload)]
+    pub fn graph_payload(&self) -> Result<String, JsValue> {
+        let payload = self.inner.borrow().graph.to_payload();
+        to_json(&payload)
     }
 }
 

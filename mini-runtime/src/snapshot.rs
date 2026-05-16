@@ -12,14 +12,26 @@ use crate::value::Value;
 
 /// The render tree is a recursive Component → Element → (Component | Element)
 /// projection of the graph following `Renders` and `Contains` edges.
+///
+/// Text and attributes are *materialized* — atom/derived references in
+/// `NodeData::Element { text }` are resolved to the current `plain_text()`
+/// representation here so the host renderer can just splat strings into
+/// the DOM.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderNode {
     pub id: NodeId,
     pub name: String,
     pub kind: NodeKind,
-    /// Element tag, only set when `kind == Element`.
+    /// Element tag (only when `kind == Element`).
     pub tag: Option<String>,
+    /// Resolved text content (for `<button>Click me</button>`-style or
+    /// `<span>{count}</span>`-style elements). Inputs use this as their
+    /// bound `value` attribute on the React side.
+    pub text: Option<String>,
+    /// Extra DOM attributes (placeholder, type, etc) carried over from
+    /// the graph node's `attrs` map, with `Value`s rendered as plain text.
+    pub attrs: BTreeMap<String, String>,
     pub children: Vec<RenderNode>,
     /// Doc/Ui pointers attached when materialized in design mode.
     pub semantic: Option<SemanticAnnotation>,

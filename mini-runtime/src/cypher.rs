@@ -14,8 +14,9 @@
 
 use std::fmt::Write as _;
 
-use crate::graph::{Node, NodeData, NodeKind};
+use crate::graph::{Node, NodeData, NodeKind, TextSource};
 use crate::runtime::{DerivedKind, EffectKind, Runtime};
+use crate::value::Value;
 
 pub fn cypher_dump(rt: &Runtime) -> String {
     let mut out = String::new();
@@ -35,7 +36,7 @@ fn write_nodes(rt: &Runtime, out: &mut String) {
     out.push_str("// ── nodes ────────────────────────────────────────────────────\n");
     use NodeKind::*;
     let order = [
-        Component, Element, Atom, Token, Derived, StyleSheet, Cause, Effect, Doc, Ui,
+        Component, Element, Repeat, Atom, Token, Derived, StyleSheet, Cause, Effect, Doc, Ui,
     ];
     for kind in &order {
         let mut nodes: Vec<&Node> = rt.graph.nodes().filter(|n| n.kind() == *kind).collect();
@@ -96,11 +97,24 @@ fn format_node(rt: &Runtime, n: &Node) -> String {
     let label = label_for(n.kind());
     let props = match &n.data {
         NodeData::Component => vec![("name", quote(&n.name))],
-        NodeData::Element { tag } => vec![("name", quote(&n.name)), ("tag", quote(tag))],
+        NodeData::Element { tag, text, attrs } => {
+            let mut v = vec![("name", quote(&n.name)), ("tag", quote(tag))];
+            if let Some(t) = text {
+                v.push(("text", format_text_source(t)));
+            }
+            if !attrs.is_empty() {
+                let entries: Vec<String> = attrs
+                    .iter()
+                    .map(|(k, val)| format!("{k}: {}", val.display()))
+                    .collect();
+                v.push(("attrs", format!("{{{}}}", entries.join(", "))));
+            }
+            v
+        }
         NodeData::Atom { value } => vec![("value", value.display())],
         NodeData::Token { value } => vec![("value", value.display())],
         NodeData::Derived { kind } => {
-            let mut v = vec![("kind", derived_kind_name(*kind).to_string())];
+            let mut v = vec![("kind", derived_kind_label(kind))];
             if let Some(current) = rt.derived(&n.id) {
                 v.push(("value", current.display()));
             }
@@ -119,7 +133,7 @@ fn format_node(rt: &Runtime, n: &Node) -> String {
             ("event", quote(event)),
         ],
         NodeData::Effect { kind } => {
-            vec![("kind", effect_kind_name(*kind).to_string())]
+            vec![("kind", effect_kind_label(kind))]
         }
         NodeData::Doc { text } => vec![("text", quote(&truncate(text, 60)))],
         NodeData::Ui { meta } => {
@@ -133,6 +147,10 @@ fn format_node(rt: &Runtime, n: &Node) -> String {
                 vec![("name", quote(&n.name)), ("meta", format!("{{{}}}", entries.join(", ")))]
             }
         }
+        NodeData::Repeat { source, template } => vec![
+            ("source", source.clone()),
+            ("template", template.clone()),
+        ],
     };
 
     let prop_str = if props.is_empty() {
@@ -159,6 +177,7 @@ fn label_for(kind: NodeKind) -> &'static str {
         NodeKind::Effect => "Effect",
         NodeKind::Doc => "Doc",
         NodeKind::Ui => "Ui",
+        NodeKind::Repeat => "Repeat",
     }
 }
 
@@ -178,19 +197,54 @@ fn edge_kind_name(k: crate::graph::EdgeKind) -> &'static str {
     }
 }
 
-fn derived_kind_name(k: DerivedKind) -> &'static str {
+fn derived_kind_label(k: &DerivedKind) -> String {
     match k {
-        DerivedKind::ThemeBg => "ThemeBg",
-        DerivedKind::ThemeFg => "ThemeFg",
-        DerivedKind::ThumbX => "ThumbX",
+        DerivedKind::ThemeBg => "ThemeBg".into(),
+        DerivedKind::ThemeFg => "ThemeFg".into(),
+        DerivedKind::ThumbX => "ThumbX".into(),
+        DerivedKind::Identity => "Identity".into(),
+        DerivedKind::Not => "Not".into(),
+        DerivedKind::EqualsLiteral { compare_to } => {
+            format!("EqualsLiteral({})", compare_to.display())
+        }
+        DerivedKind::Conditional { when_true, when_false } => format!(
+            "Conditional(true={}, false={})",
+            when_true.display(),
+            when_false.display()
+        ),
+        DerivedKind::FormatTemplate { template } => {
+            format!("FormatTemplate(\"{template}\")")
+        }
+        DerivedKind::Count => "Count".into(),
     }
 }
 
-fn effect_kind_name(k: EffectKind) -> &'static str {
+fn effect_kind_label(k: &EffectKind) -> String {
     match k {
-        EffectKind::ToggleThemeMode => "ToggleThemeMode",
+        EffectKind::ToggleThemeMode => "ToggleThemeMode".into(),
+        EffectKind::SetAtom { value } => format!("SetAtom({})", value.display()),
+        EffectKind::IncrementBy { amount } => format!("IncrementBy({amount})"),
+        EffectKind::ToggleBool => "ToggleBool".into(),
+        EffectKind::SetAtomFromInput => "SetAtomFromInput".into(),
+        EffectKind::AppendToList { value } => format!("AppendToList({})", value.display()),
+        EffectKind::AppendInputToList => "AppendInputToList".into(),
+        EffectKind::AppendReadToList => "AppendReadToList".into(),
+        EffectKind::RemoveFromList { index } => format!("RemoveFromList({index})"),
+        EffectKind::ClearList => "ClearList".into(),
     }
 }
+
+fn format_text_source(t: &TextSource) -> String {
+    match t {
+        TextSource::Literal { value } => value.display(),
+        TextSource::Ref { id } => format!("→({id})"),
+        TextSource::ItemValue => "<item>".into(),
+        TextSource::ItemField { key } => format!("<item.{key}>"),
+    }
+}
+
+#[allow(dead_code)]
+fn _suppress(_: Value) {}
 
 fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\"', "\\\""))

@@ -6,18 +6,24 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Untagged serialization: `Value::String("x")` ↔ `"x"` on the wire,
 /// `Value::Number(28)` ↔ `28`, etc. The host JS sees plain JSON values.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// Deserialization variant order matters for serde untagged: we try the
+/// most specific (Bool, Number, String, List, Object) before falling
+/// back to Null. JSON `null` reliably hits `Null` because it doesn't
+/// match any of the others.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
-    Null,
     Bool(bool),
     Number(f64),
     String(String),
+    List(Vec<Value>),
     Object(BTreeMap<String, Value>),
+    Null,
 }
 
 impl Value {
@@ -63,11 +69,33 @@ impl Value {
                 }
             }
             Value::String(s) => format!("\"{s}\""),
+            Value::List(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.display()).collect();
+                format!("[{}]", parts.join(", "))
+            }
             Value::Object(m) => {
                 let parts: Vec<String> =
                     m.iter().map(|(k, v)| format!("{k}: {}", v.display())).collect();
                 format!("{{ {} }}", parts.join(", "))
             }
+        }
+    }
+
+    /// Render as plain text for `<span>{value}</span>`-style display.
+    /// Unlike `display()`, strings are unquoted.
+    pub fn plain_text(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => {
+                if n.fract() == 0.0 && n.is_finite() {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{n}")
+                }
+            }
+            Value::List(_) | Value::Object(_) => self.display(),
         }
     }
 }

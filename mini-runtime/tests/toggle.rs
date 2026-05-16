@@ -273,6 +273,471 @@ fn event_bindings_in_snapshot_match_graph() {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
+// ─── Counter app: exercises IncrementBy + FormatTemplate ──────────────────
+
+#[test]
+fn counter_app_increment_propagates_through_format_template() {
+    use mini_runtime::graph::{Edge, EdgeKind, Graph, Node, NodeData, TextSource};
+    use mini_runtime::runtime::{DerivedKind, EffectKind};
+    use std::collections::BTreeMap;
+
+    let mut g = Graph::new();
+    g.root = Some("App".into());
+    g.add_node(Node::new("App", "App", NodeData::Component));
+    g.add_node(Node::new(
+        "root",
+        "root",
+        NodeData::Element {
+            tag: "div".into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "Count",
+        "Count",
+        NodeData::Atom {
+            value: Value::number(0),
+        },
+    ));
+    g.add_node(Node::new(
+        "Label",
+        "Label",
+        NodeData::Derived {
+            kind: DerivedKind::FormatTemplate {
+                template: "Count: {}".into(),
+            },
+        },
+    ));
+    g.add_node(Node::new(
+        "display",
+        "display",
+        NodeData::Element {
+            tag: "span".into(),
+            text: Some(TextSource::Ref { id: "Label".into() }),
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "btn",
+        "btn",
+        NodeData::Element {
+            tag: "button".into(),
+            text: Some(TextSource::Literal {
+                value: Value::string("+1"),
+            }),
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "IncClick",
+        "IncClick",
+        NodeData::Cause {
+            source: "btn".into(),
+            event: "click".into(),
+        },
+    ));
+    g.add_node(Node::new(
+        "IncBy1",
+        "IncBy1",
+        NodeData::Effect {
+            kind: EffectKind::IncrementBy { amount: 1.0 },
+        },
+    ));
+    g.add_edge(Edge::new("App", "root", EdgeKind::Renders));
+    g.add_edge(Edge::new("root", "display", EdgeKind::Contains));
+    g.add_edge(Edge::new("root", "btn", EdgeKind::Contains));
+    g.add_edge(Edge::new("Label", "Count", EdgeKind::Reads));
+    g.add_edge(Edge::new("App", "IncClick", EdgeKind::HasCause));
+    g.add_edge(Edge::new("IncClick", "IncBy1", EdgeKind::Triggers));
+    g.add_edge(Edge::new("IncBy1", "Count", EdgeKind::Reads));
+    g.add_edge(Edge::new("IncBy1", "Count", EdgeKind::Writes));
+
+    let mut rt = Runtime::new(g);
+
+    // Initial snapshot: Label resolves to "Count: 0".
+    let snap = rt.materialize(false);
+    let display_text = find_text(&snap.render_tree, "display").unwrap();
+    assert_eq!(display_text, "Count: 0");
+    // Button text is a literal.
+    let btn_text = find_text(&snap.render_tree, "btn").unwrap();
+    assert_eq!(btn_text, "+1");
+
+    // Click once.
+    let patches = rt.handle_event("btn", "click");
+    assert!(patches.iter().any(|p| matches!(
+        p,
+        Patch::AtomChanged { node, new, .. } if node == "Count" && new == &Value::number(1)
+    )));
+    assert!(patches.iter().any(|p| matches!(
+        p,
+        Patch::DerivedChanged { node, new, .. } if node == "Label" && new == &Value::string("Count: 1")
+    )));
+
+    // Three more clicks → count = 4, label = "Count: 4".
+    for _ in 0..3 {
+        rt.handle_event("btn", "click");
+    }
+    assert_eq!(rt.atom("Count"), Some(Value::number(4)));
+    assert_eq!(rt.derived("Label"), Some(Value::string("Count: 4")));
+}
+
+#[test]
+fn repeat_node_expands_list_items_into_children() {
+    // Append two items to a list atom, then materialize and verify the
+    // render tree contains two iteration copies, each carrying its
+    // resolved item text.
+    use mini_runtime::graph::{Edge, EdgeKind, Graph, Node, NodeData, TextSource};
+    use mini_runtime::runtime::EffectKind;
+    use std::collections::BTreeMap;
+
+    let mut g = Graph::new();
+    g.root = Some("App".into());
+    g.add_node(Node::new("App", "App", NodeData::Component));
+    g.add_node(Node::new(
+        "list",
+        "list",
+        NodeData::Element {
+            tag: "ul".into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "item",
+        "item",
+        NodeData::Element {
+            tag: "li".into(),
+            text: Some(TextSource::ItemValue),
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "items_repeat",
+        "items_repeat",
+        NodeData::Repeat {
+            source: "Items".into(),
+            template: "item".into(),
+        },
+    ));
+    g.add_node(Node::new(
+        "Items",
+        "Items",
+        NodeData::Atom {
+            value: Value::List(vec![Value::string("alpha"), Value::string("beta")]),
+        },
+    ));
+    g.add_edge(Edge::new("App", "list", EdgeKind::Renders));
+    g.add_edge(Edge::new("list", "items_repeat", EdgeKind::Contains));
+
+    let rt = Runtime::new(g);
+    let snap = rt.materialize(false);
+    let list = &snap.render_tree.children[0];
+    assert_eq!(list.id, "list");
+    assert_eq!(list.children.len(), 2);
+    assert_eq!(list.children[0].text.as_deref(), Some("alpha"));
+    assert_eq!(list.children[1].text.as_deref(), Some("beta"));
+    // Both rendered children share the template id but represent different items.
+    assert_eq!(list.children[0].id, "item");
+    assert_eq!(list.children[1].id, "item");
+}
+
+#[test]
+fn repeat_appends_react_to_atom_change() {
+    // Use AppendInputToList to drive list growth, verify repeat picks up.
+    use mini_runtime::graph::{Edge, EdgeKind, Graph, Node, NodeData, TextSource};
+    use mini_runtime::runtime::EffectKind;
+    use std::collections::BTreeMap;
+
+    let mut g = Graph::new();
+    g.root = Some("App".into());
+    g.add_node(Node::new("App", "App", NodeData::Component));
+    g.add_node(Node::new(
+        "list",
+        "list",
+        NodeData::Element {
+            tag: "ul".into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "item",
+        "item",
+        NodeData::Element {
+            tag: "li".into(),
+            text: Some(TextSource::ItemValue),
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "rep",
+        "rep",
+        NodeData::Repeat {
+            source: "Items".into(),
+            template: "item".into(),
+        },
+    ));
+    g.add_node(Node::new(
+        "Items",
+        "Items",
+        NodeData::Atom {
+            value: Value::List(vec![]),
+        },
+    ));
+    g.add_node(Node::new(
+        "input",
+        "input",
+        NodeData::Element {
+            tag: "input".into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "Add",
+        "Add",
+        NodeData::Cause {
+            source: "input".into(),
+            event: "change".into(),
+        },
+    ));
+    g.add_node(Node::new(
+        "AppendEff",
+        "AppendEff",
+        NodeData::Effect {
+            kind: EffectKind::AppendInputToList,
+        },
+    ));
+
+    g.add_edge(Edge::new("App", "list", EdgeKind::Renders));
+    g.add_edge(Edge::new("list", "rep", EdgeKind::Contains));
+    g.add_edge(Edge::new("App", "input", EdgeKind::Renders));
+    g.add_edge(Edge::new("App", "Add", EdgeKind::HasCause));
+    g.add_edge(Edge::new("Add", "AppendEff", EdgeKind::Triggers));
+    g.add_edge(Edge::new("AppendEff", "Items", EdgeKind::Writes));
+
+    let mut rt = Runtime::new(g);
+    rt.dispatch_event("input", "change", Some(Value::string("buy milk")));
+    rt.dispatch_event("input", "change", Some(Value::string("walk dog")));
+
+    let snap = rt.materialize(false);
+    // Find the list element among the App's rendered children.
+    let list = snap
+        .render_tree
+        .children
+        .iter()
+        .find(|c| c.id == "list")
+        .expect("list rendered");
+    assert_eq!(list.children.len(), 2);
+    assert_eq!(list.children[0].text.as_deref(), Some("buy milk"));
+    assert_eq!(list.children[1].text.as_deref(), Some("walk dog"));
+}
+
+#[test]
+fn derived_kinds_with_multi_word_fields_use_camelcase() {
+    // Regression: Claude correctly emits camelCase field names
+    // (whenTrue/whenFalse, compareTo). The Rust enum must deserialize
+    // those, not snake_case. Without rename_all_fields = "camelCase",
+    // payloads with `conditional` or `equalsLiteral` would fail to
+    // deserialize and crash the WASM boundary.
+    use mini_runtime::graph::{Graph, GraphPayload};
+    let json = r#"{
+        "root": "App",
+        "nodes": [
+            { "id": "App", "name": "App", "type": "component" },
+            { "id": "Flag", "name": "Flag", "type": "atom", "value": true },
+            { "id": "Style", "name": "Style", "type": "derived",
+              "op": "conditional", "whenTrue": "line-through", "whenFalse": "none" },
+            { "id": "IsFive", "name": "IsFive", "type": "derived",
+              "op": "equalsLiteral", "compareTo": 5 }
+        ],
+        "edges": [
+            { "from": "Style", "to": "Flag", "kind": "reads" },
+            { "from": "IsFive", "to": "Flag", "kind": "reads" }
+        ]
+    }"#;
+    let payload: GraphPayload =
+        serde_json::from_str(json).expect("camelCase derived fields must deserialize");
+    let rt = Runtime::new(Graph::from_payload(payload));
+    assert_eq!(rt.derived("Style"), Some(Value::string("line-through")));
+    assert_eq!(rt.derived("IsFive"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn cyclic_graph_does_not_overflow_the_stack() {
+    // Simulates the kind of malformed render tree the LLM might emit:
+    // Element A → Component B → Element A. Without cycle detection this
+    // would recurse forever and overflow the WASM stack ("memory access
+    // out of bounds").
+    use mini_runtime::graph::{Edge, EdgeKind, Graph, Node, NodeData};
+    use std::collections::BTreeMap;
+    let mut g = Graph::new();
+    g.root = Some("App".into());
+    g.add_node(Node::new("App", "App", NodeData::Component));
+    g.add_node(Node::new(
+        "elemA",
+        "elemA",
+        NodeData::Element {
+            tag: "div".into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new("CompB", "CompB", NodeData::Component));
+    g.add_edge(Edge::new("App", "elemA", EdgeKind::Renders));
+    g.add_edge(Edge::new("elemA", "CompB", EdgeKind::Contains));
+    g.add_edge(Edge::new("CompB", "elemA", EdgeKind::Renders)); // cycle!
+
+    let rt = Runtime::new(g);
+    // If this overflows we never get here.
+    let snap = rt.materialize(false);
+    assert_eq!(snap.render_tree.id, "App");
+    // The cycle should be broken: elemA appears once.
+    let mut elem_a_count = 0;
+    walk(&snap.render_tree, &mut |n| {
+        if n.id == "elemA" {
+            elem_a_count += 1;
+        }
+    });
+    assert_eq!(elem_a_count, 1, "elemA must render exactly once even though a cycle reaches it twice");
+}
+
+fn walk(node: &mini_runtime::RenderNode, f: &mut impl FnMut(&mini_runtime::RenderNode)) {
+    f(node);
+    for c in &node.children {
+        walk(c, f);
+    }
+}
+
+#[test]
+fn graph_payload_round_trips_through_json() {
+    // Build the toggle app, serialize it, parse it back, and verify the
+    // round-tripped runtime behaves identically.
+    use mini_runtime::graph::GraphPayload;
+    use mini_runtime::toggle_app::build_toggle_app;
+
+    let original = build_toggle_app();
+    let payload = original.to_payload();
+    let json = serde_json::to_string(&payload).expect("serialize");
+    let parsed: GraphPayload = serde_json::from_str(&json).expect("deserialize");
+
+    let mut rt = Runtime::new(mini_runtime::graph::Graph::from_payload(parsed));
+    assert_eq!(rt.atom(ids::THEME_MODE), Some(Value::string("light")));
+    rt.handle_event(ids::TOGGLE_TRACK, "click");
+    assert_eq!(rt.atom(ids::THEME_MODE), Some(Value::string("dark")));
+}
+
+#[test]
+fn ai_generator_shape_loads_into_runtime() {
+    // Mirror what the server emits: a counter app graph. If the shape
+    // here gets out of sync with the system prompt the LLM uses, this
+    // test fails fast.
+    use mini_runtime::graph::{Graph, GraphPayload};
+
+    let json = r##"{
+      "root": "App",
+      "nodes": [
+        { "id": "App", "name": "App", "type": "component" },
+        { "id": "appRoot", "name": "appRoot", "type": "element", "tag": "div" },
+        { "id": "display", "name": "display", "type": "element", "tag": "div",
+          "text": { "kind": "ref", "id": "Count" } },
+        { "id": "btn", "name": "btn", "type": "element", "tag": "button",
+          "text": { "kind": "literal", "value": "+1" } },
+        { "id": "Count", "name": "Count", "type": "atom", "value": 0 },
+        { "id": "AppStyles", "name": "AppStyles", "type": "styleSheet", "rules": {
+            "appRoot": { "background": { "kind": "literal", "value": "#fff" } }
+        } },
+        { "id": "Click", "name": "Click", "type": "cause", "source": "btn", "event": "click" },
+        { "id": "Inc", "name": "Inc", "type": "effect", "op": "incrementBy", "amount": 1 }
+      ],
+      "edges": [
+        { "from": "App", "to": "appRoot", "kind": "renders" },
+        { "from": "appRoot", "to": "display", "kind": "contains" },
+        { "from": "appRoot", "to": "btn", "kind": "contains" },
+        { "from": "App", "to": "Click", "kind": "hasCause" },
+        { "from": "Click", "to": "Inc", "kind": "triggers" },
+        { "from": "Inc", "to": "Count", "kind": "reads" },
+        { "from": "Inc", "to": "Count", "kind": "writes" },
+        { "from": "AppStyles", "to": "appRoot", "kind": "targets" }
+      ]
+    }"##;
+    let payload: GraphPayload = serde_json::from_str(json).expect("deserialize counter app");
+    let mut rt = Runtime::new(Graph::from_payload(payload));
+
+    assert_eq!(rt.atom("Count"), Some(Value::number(0)));
+    rt.handle_event("btn", "click");
+    rt.handle_event("btn", "click");
+    rt.handle_event("btn", "click");
+    assert_eq!(rt.atom("Count"), Some(Value::number(3)));
+}
+
+#[test]
+fn input_change_event_writes_to_bound_atom() {
+    use mini_runtime::graph::{Edge, EdgeKind, Graph, Node, NodeData, TextSource};
+    use mini_runtime::runtime::EffectKind;
+    use std::collections::BTreeMap;
+
+    let mut g = Graph::new();
+    g.root = Some("App".into());
+    g.add_node(Node::new("App", "App", NodeData::Component));
+    g.add_node(Node::new(
+        "input",
+        "input",
+        NodeData::Element {
+            tag: "input".into(),
+            text: Some(TextSource::Ref { id: "Name".into() }),
+            attrs: BTreeMap::new(),
+        },
+    ));
+    g.add_node(Node::new(
+        "Name",
+        "Name",
+        NodeData::Atom {
+            value: Value::string(""),
+        },
+    ));
+    g.add_node(Node::new(
+        "InputChange",
+        "InputChange",
+        NodeData::Cause {
+            source: "input".into(),
+            event: "change".into(),
+        },
+    ));
+    g.add_node(Node::new(
+        "WriteName",
+        "WriteName",
+        NodeData::Effect {
+            kind: EffectKind::SetAtomFromInput,
+        },
+    ));
+    g.add_edge(Edge::new("App", "input", EdgeKind::Renders));
+    g.add_edge(Edge::new("App", "InputChange", EdgeKind::HasCause));
+    g.add_edge(Edge::new("InputChange", "WriteName", EdgeKind::Triggers));
+    g.add_edge(Edge::new("WriteName", "Name", EdgeKind::Writes));
+
+    let mut rt = Runtime::new(g);
+    let patches = rt.dispatch_event("input", "change", Some(Value::string("Tom")));
+    assert!(patches.iter().any(|p| matches!(
+        p,
+        Patch::AtomChanged { node, new, .. } if node == "Name" && new == &Value::string("Tom")
+    )));
+    assert_eq!(rt.atom("Name"), Some(Value::string("Tom")));
+}
+
+fn find_text<'a>(node: &'a mini_runtime::RenderNode, id: &str) -> Option<&'a str> {
+    if node.id == id {
+        return node.text.as_deref();
+    }
+    for c in &node.children {
+        if let Some(t) = find_text(c, id) {
+            return Some(t);
+        }
+    }
+    None
+}
+
 fn patches_contain_atom_change(patches: &[Patch], node: &str, old: &str, new: &str) -> bool {
     patches.iter().any(|p| match p {
         Patch::AtomChanged {

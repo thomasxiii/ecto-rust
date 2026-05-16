@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Engine, ensureEngineReady, type GraphNode, type GraphPayload, type RenderTreeNode } from './engine'
 import { TINY_REACT_APP } from './fixture'
-import { MiniToggleApp } from './MiniToggleApp'
+import { MiniAppView } from './MiniAppView'
+import { tokens } from './ui'
 import { Preview } from './Preview'
 import { PromptToolbar } from './PromptToolbar'
 import { Timeline } from './Timeline'
@@ -21,7 +22,7 @@ export function App() {
   const [view, setView] = useState<View>('engine')
 
   if (view === 'mini-toggle') {
-    return <MiniToggleApp onBack={() => setView('engine')} />
+    return <MiniAppView onBack={() => setView('engine')} />
   }
   return <EngineView onOpenMiniToggle={() => setView('mini-toggle')} />
 }
@@ -209,38 +210,56 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
   }, [graph, layerView])
 
   return (
-    <div style={{ display: 'flex', width: '100%' }}>
+    <div style={{ display: 'flex', width: '100%', background: tokens.bg }}>
       <aside
         style={{
           width: 320,
-          borderRight: '1px solid #2a2a30',
-          padding: 12,
+          borderRight: `1px solid ${tokens.border}`,
+          padding: 16,
           overflow: 'auto',
-          background: '#16161b',
+          background: tokens.bg,
         }}
       >
-        <h3 style={{ margin: '0 0 8px' }}>ecto-rust</h3>
-        <div style={{ fontSize: 11, color: serverConnected ? '#7d7' : '#aaa', marginBottom: 12 }}>
+        <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 600 }}>ecto-rust</h3>
+        <div
+          style={{
+            fontSize: 11,
+            color: serverConnected ? '#10b981' : tokens.fgMuted,
+            marginBottom: 16,
+          }}
+        >
           {projectId
             ? serverConnected
               ? `● live · project ${projectId.slice(0, 8)}`
               : `○ local-only mode`
             : 'no project'}
         </div>
-        <button onClick={importDemo} disabled={!ready} style={btn}>
-          {ready ? 'Import demo project' : 'Loading WASM…'}
-        </button>
-        <button onClick={buildSemanticLayer} style={{ ...btn, marginTop: 8 }}>
-          Build semantic + UI layers
-        </button>
-        <button
-          onClick={onOpenMiniToggle}
-          disabled={!ready}
-          style={{ ...btn, marginTop: 8, background: '#2d4a3a' }}
-        >
-          Run mini toggle app →
-        </button>
-        <div style={{ marginTop: 16, fontSize: 11, color: '#888' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button
+            onClick={importDemo}
+            disabled={!ready}
+            className="ec-btn ec-btn-secondary"
+            style={{ width: '100%' }}
+          >
+            {ready ? 'Import demo project' : 'Loading WASM…'}
+          </button>
+          <button
+            onClick={buildSemanticLayer}
+            className="ec-btn ec-btn-secondary"
+            style={{ width: '100%' }}
+          >
+            Build semantic + UI layers
+          </button>
+          <button
+            onClick={onOpenMiniToggle}
+            disabled={!ready}
+            className="ec-btn"
+            style={{ width: '100%' }}
+          >
+            Open mini-runtime apps →
+          </button>
+        </div>
+        <div style={{ marginTop: 16, fontSize: 11, color: tokens.fgMuted }}>
           {graph.nodes.length} nodes · {graph.edges.length} edges
         </div>
         <div style={{ marginTop: 12, display: 'flex', gap: 4 }}>
@@ -248,12 +267,8 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
             <button
               key={l}
               onClick={() => setLayerView(l)}
-              style={{
-                ...btn,
-                background: layerView === l ? '#3a3a45' : '#222',
-                padding: '4px 8px',
-                fontSize: 11,
-              }}
+              className={`ec-btn ${layerView === l ? '' : 'ec-btn-secondary'}`}
+              style={{ padding: '4px 8px', fontSize: 11, flex: 1 }}
             >
               {l}
             </button>
@@ -265,15 +280,17 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
               key={n.id}
               onClick={() => onSelect(n.id)}
               style={{
-                padding: '4px 6px',
+                padding: '6px 8px',
                 cursor: 'pointer',
-                borderRadius: 4,
-                background: selectedId === n.id ? '#2c2c34' : 'transparent',
+                borderRadius: tokens.radius,
+                background: selectedId === n.id ? 'var(--accent-soft)' : 'transparent',
+                color: selectedId === n.id ? tokens.accent : tokens.fg,
                 fontSize: 12,
-                color: '#ccc',
+                marginBottom: 1,
               }}
             >
-              <span style={{ color: '#888' }}>{n.type}</span> {n.name}
+              <span style={{ color: tokens.fgMuted, marginRight: 6 }}>{n.type}</span>
+              {n.name}
             </li>
           ))}
         </ul>
@@ -318,37 +335,50 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
       <aside
         style={{
           width: 320,
-          borderLeft: '1px solid #2a2a30',
-          padding: 12,
-          background: '#16161b',
+          borderLeft: `1px solid ${tokens.border}`,
+          padding: 16,
+          background: tokens.bg,
+          overflow: 'auto',
         }}
       >
-        <h4 style={{ margin: '0 0 12px' }}>Inspector</h4>
+        <h4 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>Inspector</h4>
         {selectedNode ? (
           <>
-            <div style={{ fontSize: 11, color: '#888' }}>{selectedNode.type}</div>
-            <div style={{ fontSize: 13, marginBottom: 8 }}>{selectedNode.id}</div>
+            <div style={{ fontSize: 11, color: tokens.fgMuted }}>{selectedNode.type}</div>
+            <div style={{ fontSize: 13, marginBottom: 12, fontFamily: tokens.fontMono }}>
+              {selectedNode.id}
+            </div>
             <input
+              className="ec-input"
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '6px 8px',
-                background: '#0f0f12',
-                border: '1px solid #2a2a30',
-                borderRadius: 4,
-                color: '#e6e6ea',
-              }}
             />
-            <button onClick={applyEdit} style={{ ...btn, marginTop: 8, width: '100%' }}>
+            <button
+              onClick={applyEdit}
+              className="ec-btn"
+              style={{ marginTop: 8, width: '100%' }}
+            >
               Apply
             </button>
-            <pre style={{ marginTop: 12, fontSize: 11, color: '#888', overflow: 'auto' }}>
+            <pre
+              style={{
+                marginTop: 12,
+                fontSize: 11,
+                color: tokens.fgMuted,
+                overflow: 'auto',
+                background: tokens.bgMuted,
+                padding: 8,
+                borderRadius: tokens.radius,
+                border: `1px solid ${tokens.border}`,
+              }}
+            >
               {JSON.stringify(selectedNode.data, null, 2)}
             </pre>
           </>
         ) : (
-          <p style={{ fontSize: 12, color: '#888' }}>Click a node in the preview or list.</p>
+          <p style={{ fontSize: 12, color: tokens.fgMuted }}>
+            Click a node in the preview or list.
+          </p>
         )}
       </aside>
     </div>
@@ -421,13 +451,3 @@ function applyServerEvent(eng: Engine, e: ServerGraphEvent): void {
   }
 }
 
-const btn: React.CSSProperties = {
-  background: '#3a3a45',
-  border: 'none',
-  borderRadius: 4,
-  color: '#e6e6ea',
-  padding: '6px 10px',
-  cursor: 'pointer',
-  width: '100%',
-  fontSize: 12,
-}

@@ -7,17 +7,22 @@
 //!
 //! Edges are typed (`EdgeKind`) and directed. Most graph queries walk by
 //! edge kind: incoming/outgoing edges of a given kind from a node.
+//!
+//! Serialization: a `GraphPayload { nodes, edges }` is the wire format the
+//! server uses to deliver LLM-generated apps. `NodeData` is tagged with a
+//! `kind` discriminator so the JSON shape is ergonomic to author. See
+//! `Graph::from_payload` and `Graph::to_payload`.
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::{DerivedKind, EffectKind};
 use crate::value::Value;
 
 pub type NodeId = String;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NodeKind {
     Component,
@@ -30,9 +35,15 @@ pub enum NodeKind {
     Effect,
     Doc,
     Ui,
+    /// A `Repeat` is *not* rendered as a node in the render tree. It's an
+    /// instruction: "for each item in `source`, render a copy of
+    /// `template` in this position." Used for list rendering (todos,
+    /// search results, etc).
+    Repeat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum EdgeKind {
     /// Component → Element (the component's rendered root element).
     Renders,
@@ -65,12 +76,40 @@ impl NodeKind {
     }
 }
 
-#[derive(Debug, Clone)]
+/// What an Element renders inside itself.
+///
+///   * `Literal`     — static text.
+///   * `Ref`         — live-bound to an atom/derived.
+///   * `ItemValue`   — the current item when this element is inside a
+///                     `Repeat` (whole value, rendered as `plain_text`).
+///   * `ItemField`   — a field of the current item (when items are objects).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TextSource {
+    Literal { value: Value },
+    Ref { id: NodeId },
+    ItemValue,
+    ItemField { key: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum NodeData {
     Component,
     Element {
-        /// HTML-ish tag name, used by the renderer.
+        /// HTML-ish tag name, used by the renderer (e.g. "div", "button",
+        /// "input", "span").
         tag: String,
+        /// Optional text content. If `Ref`, the runtime substitutes the
+        /// referenced atom/derived's current `plain_text()` value at render.
+        /// Inputs treat this as their bound `value` and emit a `change`
+        /// event with the new value when the user types.
+        #[serde(default)]
+        text: Option<TextSource>,
+        /// Extra DOM attributes (placeholder, type, aria-*). Keep small;
+        /// the renderer passes them straight through.
+        #[serde(default)]
+        attrs: BTreeMap<String, Value>,
     },
     Atom {
         value: Value,
@@ -79,6 +118,7 @@ pub enum NodeData {
         value: Value,
     },
     Derived {
+        #[serde(flatten)]
         kind: DerivedKind,
     },
     StyleSheet {
@@ -88,10 +128,11 @@ pub enum NodeData {
     Cause {
         /// Element that emits the event.
         source: NodeId,
-        /// e.g. "click".
+        /// e.g. "click", "change", "submit", "focus".
         event: String,
     },
     Effect {
+        #[serde(flatten)]
         kind: EffectKind,
     },
     Doc {
@@ -99,6 +140,14 @@ pub enum NodeData {
     },
     Ui {
         meta: BTreeMap<String, Value>,
+    },
+    /// Instructs the renderer: for each item in `source` (an Atom holding
+    /// a `Value::List`), render a copy of `template` (an Element) inline.
+    /// Repeat nodes are *children* of an Element via Contains edges and
+    /// are expanded at render time — they don't appear in the render tree.
+    Repeat {
+        source: NodeId,
+        template: NodeId,
     },
 }
 
@@ -115,22 +164,26 @@ impl NodeData {
             NodeData::Effect { .. } => NodeKind::Effect,
             NodeData::Doc { .. } => NodeKind::Doc,
             NodeData::Ui { .. } => NodeKind::Ui,
+            NodeData::Repeat { .. } => NodeKind::Repeat,
         }
     }
 }
 
 /// A style property value can be a literal or a reference to a Token / Derived
 /// node. References are resolved during style materialization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StyleValue {
-    Literal(Value),
-    Ref(NodeId),
+    Literal { value: Value },
+    Ref { id: NodeId },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: NodeId,
     pub name: String,
+    #[serde(flatten)]
     pub data: NodeData,
 }
 
@@ -148,7 +201,8 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
@@ -165,15 +219,30 @@ impl Edge {
     }
 }
 
+/// Wire-format payload — the JSON shape the server's mini-app generator
+/// produces. `Graph::from_payload` turns this into an indexed graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GraphPayload {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    /// Optional convenience field: which component is the render-tree root.
+    /// If omitted, the runtime uses `ROOT_COMPONENT_ID` ("App") if present.
+    #[serde(default)]
+    pub root: Option<NodeId>,
+}
+
 /// Graph storage. Nodes are keyed by id; edges are stored as a flat vector
 /// for ordered iteration (deterministic patches) plus auxiliary adjacency
 /// indices keyed by `(node, edge_kind)` for O(1) typed lookups.
 #[derive(Debug, Default, Clone)]
 pub struct Graph {
     nodes: HashMap<NodeId, Node>,
+    /// Original insertion-order ids for stable iteration.
+    node_order: Vec<NodeId>,
     edges: Vec<Edge>,
     out_index: HashMap<(NodeId, EdgeKind), Vec<usize>>,
     in_index: HashMap<(NodeId, EdgeKind), Vec<usize>>,
+    pub root: Option<NodeId>,
 }
 
 impl Graph {
@@ -181,7 +250,35 @@ impl Graph {
         Self::default()
     }
 
+    /// Rebuild a graph from a wire-format payload, re-indexing adjacency.
+    pub fn from_payload(payload: GraphPayload) -> Self {
+        let mut g = Graph::new();
+        g.root = payload.root;
+        for n in payload.nodes {
+            g.add_node(n);
+        }
+        for e in payload.edges {
+            g.add_edge(e);
+        }
+        g
+    }
+
+    pub fn to_payload(&self) -> GraphPayload {
+        GraphPayload {
+            nodes: self
+                .node_order
+                .iter()
+                .filter_map(|id| self.nodes.get(id).cloned())
+                .collect(),
+            edges: self.edges.clone(),
+            root: self.root.clone(),
+        }
+    }
+
     pub fn add_node(&mut self, node: Node) {
+        if !self.nodes.contains_key(&node.id) {
+            self.node_order.push(node.id.clone());
+        }
         self.nodes.insert(node.id.clone(), node);
     }
 
@@ -207,14 +304,13 @@ impl Graph {
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.values()
+        self.node_order.iter().filter_map(|id| self.nodes.get(id))
     }
 
     pub fn edges(&self) -> &[Edge] {
         &self.edges
     }
 
-    /// All outgoing edges of a given kind, in insertion order.
     pub fn outgoing(&self, from: &str, kind: EdgeKind) -> Vec<&Edge> {
         self.out_index
             .get(&(from.to_string(), kind))
@@ -222,7 +318,6 @@ impl Graph {
             .unwrap_or_default()
     }
 
-    /// All incoming edges of a given kind, in insertion order.
     pub fn incoming(&self, to: &str, kind: EdgeKind) -> Vec<&Edge> {
         self.in_index
             .get(&(to.to_string(), kind))
@@ -230,7 +325,6 @@ impl Graph {
             .unwrap_or_default()
     }
 
-    /// Convenience: the target ids of all `from -[kind]->` edges.
     pub fn outgoing_targets(&self, from: &str, kind: EdgeKind) -> Vec<NodeId> {
         self.outgoing(from, kind)
             .into_iter()
@@ -238,7 +332,6 @@ impl Graph {
             .collect()
     }
 
-    /// Convenience: the source ids of all `-[kind]-> to` edges.
     pub fn incoming_sources(&self, to: &str, kind: EdgeKind) -> Vec<NodeId> {
         self.incoming(to, kind)
             .into_iter()
@@ -271,6 +364,8 @@ mod tests {
             "B",
             NodeData::Element {
                 tag: "div".into(),
+                text: None,
+                attrs: BTreeMap::new(),
             },
         ));
         g.add_edge(Edge::new("a", "b", EdgeKind::Renders));

@@ -9,9 +9,17 @@ description = "Ecto mini-runtime: graph-as-source-of-truth reactive UI prototype
 [dependencies]
 serde.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lib]
 path = "src/lib.rs"
 
 [[example]]
 name = "toggle"
 path = "examples/toggle.rs"
+
+[[example]]
+name = "load_payload"
+path = "examples/load_payload.rs"
+

@@ -1,5 +1,6 @@
 //! Fixture: builds the light/dark toggle app's graph exactly as described
-//! in the runtime spec. Reused by tests, the example, and any host demo.
+//! in the runtime spec. Reused by tests, the example, and the seed graph
+//! the web shell loads on startup.
 
 use std::collections::BTreeMap;
 
@@ -7,8 +8,6 @@ use crate::graph::{Edge, EdgeKind, Graph, Node, NodeData, NodeId, StyleValue};
 use crate::runtime::{DerivedKind, EffectKind};
 use crate::value::Value;
 
-/// Stable node ids — exposed as constants so tests can refer to them by name
-/// without stringly-typed risk.
 pub mod ids {
     pub const APP: &str = "App";
     pub const APP_ROOT: &str = "appRoot";
@@ -40,29 +39,15 @@ pub mod ids {
 pub fn build_toggle_app() -> Graph {
     use ids::*;
     let mut g = Graph::new();
+    g.root = Some(APP.into());
 
-    // ── Components ──
     g.add_node(Node::new(APP, "App", NodeData::Component));
     g.add_node(Node::new(TOGGLE, "Toggle", NodeData::Component));
 
-    // ── Elements ──
-    g.add_node(Node::new(
-        APP_ROOT,
-        "appRoot",
-        NodeData::Element { tag: "div".into() },
-    ));
-    g.add_node(Node::new(
-        TOGGLE_TRACK,
-        "toggleTrack",
-        NodeData::Element { tag: "div".into() },
-    ));
-    g.add_node(Node::new(
-        TOGGLE_THUMB,
-        "toggleThumb",
-        NodeData::Element { tag: "div".into() },
-    ));
+    g.add_node(element(APP_ROOT, "appRoot", "div"));
+    g.add_node(element(TOGGLE_TRACK, "toggleTrack", "div"));
+    g.add_node(element(TOGGLE_THUMB, "toggleThumb", "div"));
 
-    // ── State atom ──
     g.add_node(Node::new(
         THEME_MODE,
         "ThemeMode",
@@ -71,37 +56,11 @@ pub fn build_toggle_app() -> Graph {
         },
     ));
 
-    // ── Primitive tokens ──
-    g.add_node(Node::new(
-        LIGHT_BG,
-        "LightBg",
-        NodeData::Token {
-            value: Value::string("#ffffff"),
-        },
-    ));
-    g.add_node(Node::new(
-        LIGHT_FG,
-        "LightFg",
-        NodeData::Token {
-            value: Value::string("#111111"),
-        },
-    ));
-    g.add_node(Node::new(
-        DARK_BG,
-        "DarkBg",
-        NodeData::Token {
-            value: Value::string("#111111"),
-        },
-    ));
-    g.add_node(Node::new(
-        DARK_FG,
-        "DarkFg",
-        NodeData::Token {
-            value: Value::string("#ffffff"),
-        },
-    ));
+    g.add_node(token(LIGHT_BG, "LightBg", "#ffffff"));
+    g.add_node(token(LIGHT_FG, "LightFg", "#111111"));
+    g.add_node(token(DARK_BG, "DarkBg", "#111111"));
+    g.add_node(token(DARK_FG, "DarkFg", "#ffffff"));
 
-    // ── Derived values ──
     g.add_node(Node::new(
         BG,
         "Bg",
@@ -124,7 +83,6 @@ pub fn build_toggle_app() -> Graph {
         },
     ));
 
-    // ── Style sheets ──
     g.add_node(Node::new(
         APP_STYLES,
         "AppStyles",
@@ -140,7 +98,6 @@ pub fn build_toggle_app() -> Graph {
         },
     ));
 
-    // ── Interaction ──
     g.add_node(Node::new(
         TOGGLE_CLICK,
         "ToggleClick",
@@ -157,7 +114,6 @@ pub fn build_toggle_app() -> Graph {
         },
     ));
 
-    // ── Semantic / design-mode metadata ──
     g.add_node(Node::new(
         TOGGLE_DOC,
         "ToggleDoc",
@@ -174,20 +130,16 @@ pub fn build_toggle_app() -> Graph {
         NodeData::Ui { meta: ui_meta },
     ));
 
-    // ── Edges ──
-    // Render tree.
     g.add_edge(Edge::new(APP, APP_ROOT, EdgeKind::Renders));
     g.add_edge(Edge::new(APP_ROOT, TOGGLE, EdgeKind::Contains));
     g.add_edge(Edge::new(TOGGLE, TOGGLE_TRACK, EdgeKind::Renders));
     g.add_edge(Edge::new(TOGGLE_TRACK, TOGGLE_THUMB, EdgeKind::Contains));
 
-    // Interaction graph.
     g.add_edge(Edge::new(TOGGLE, TOGGLE_CLICK, EdgeKind::HasCause));
     g.add_edge(Edge::new(TOGGLE_CLICK, TOGGLE_THEME, EdgeKind::Triggers));
     g.add_edge(Edge::new(TOGGLE_THEME, THEME_MODE, EdgeKind::Reads));
     g.add_edge(Edge::new(TOGGLE_THEME, THEME_MODE, EdgeKind::Writes));
 
-    // Derived dependencies.
     g.add_edge(Edge::new(BG, THEME_MODE, EdgeKind::Reads));
     g.add_edge(Edge::new(BG, LIGHT_BG, EdgeKind::Uses));
     g.add_edge(Edge::new(BG, DARK_BG, EdgeKind::Uses));
@@ -196,7 +148,6 @@ pub fn build_toggle_app() -> Graph {
     g.add_edge(Edge::new(FG, DARK_FG, EdgeKind::Uses));
     g.add_edge(Edge::new(THUMB_X, THEME_MODE, EdgeKind::Reads));
 
-    // Stylesheet bindings.
     g.add_edge(Edge::new(APP_STYLES, APP_ROOT, EdgeKind::Targets));
     g.add_edge(Edge::new(APP_STYLES, BG, EdgeKind::Uses));
     g.add_edge(Edge::new(APP_STYLES, FG, EdgeKind::Uses));
@@ -206,29 +157,56 @@ pub fn build_toggle_app() -> Graph {
     g.add_edge(Edge::new(TOGGLE_STYLES, FG, EdgeKind::Uses));
     g.add_edge(Edge::new(TOGGLE_STYLES, THUMB_X, EdgeKind::Uses));
 
-    // Semantic edges.
     g.add_edge(Edge::new(TOGGLE, TOGGLE_DOC, EdgeKind::HasDoc));
     g.add_edge(Edge::new(TOGGLE, TOGGLE_UI, EdgeKind::HasUi));
 
     g
 }
 
+fn element(id: &str, name: &str, tag: &str) -> Node {
+    Node::new(
+        id,
+        name,
+        NodeData::Element {
+            tag: tag.into(),
+            text: None,
+            attrs: BTreeMap::new(),
+        },
+    )
+}
+
+fn token(id: &str, name: &str, value: &str) -> Node {
+    Node::new(
+        id,
+        name,
+        NodeData::Token {
+            value: Value::string(value),
+        },
+    )
+}
+
 fn app_styles_rules() -> BTreeMap<NodeId, BTreeMap<String, StyleValue>> {
     let mut rules: BTreeMap<NodeId, BTreeMap<String, StyleValue>> = BTreeMap::new();
     let mut app_root: BTreeMap<String, StyleValue> = BTreeMap::new();
-    app_root.insert("background".into(), StyleValue::Ref(ids::BG.into()));
-    app_root.insert("color".into(), StyleValue::Ref(ids::FG.into()));
+    app_root.insert("background".into(), StyleValue::Ref { id: ids::BG.into() });
+    app_root.insert("color".into(), StyleValue::Ref { id: ids::FG.into() });
     app_root.insert(
         "minHeight".into(),
-        StyleValue::Literal(Value::string("100vh")),
+        StyleValue::Literal {
+            value: Value::string("100vh"),
+        },
     );
     app_root.insert(
         "display".into(),
-        StyleValue::Literal(Value::string("grid")),
+        StyleValue::Literal {
+            value: Value::string("grid"),
+        },
     );
     app_root.insert(
         "placeItems".into(),
-        StyleValue::Literal(Value::string("center")),
+        StyleValue::Literal {
+            value: Value::string("center"),
+        },
     );
     rules.insert(ids::APP_ROOT.into(), app_root);
     rules
@@ -238,24 +216,66 @@ fn toggle_styles_rules() -> BTreeMap<NodeId, BTreeMap<String, StyleValue>> {
     let mut rules: BTreeMap<NodeId, BTreeMap<String, StyleValue>> = BTreeMap::new();
 
     let mut track: BTreeMap<String, StyleValue> = BTreeMap::new();
-    track.insert("background".into(), StyleValue::Ref(ids::FG.into()));
-    track.insert("color".into(), StyleValue::Ref(ids::BG.into()));
-    track.insert("width".into(), StyleValue::Literal(Value::number(64)));
-    track.insert("height".into(), StyleValue::Literal(Value::number(36)));
-    track.insert("borderRadius".into(), StyleValue::Literal(Value::number(999)));
-    track.insert("padding".into(), StyleValue::Literal(Value::number(4)));
+    track.insert("background".into(), StyleValue::Ref { id: ids::FG.into() });
+    track.insert("color".into(), StyleValue::Ref { id: ids::BG.into() });
+    track.insert(
+        "width".into(),
+        StyleValue::Literal {
+            value: Value::number(64),
+        },
+    );
+    track.insert(
+        "height".into(),
+        StyleValue::Literal {
+            value: Value::number(36),
+        },
+    );
+    track.insert(
+        "borderRadius".into(),
+        StyleValue::Literal {
+            value: Value::number(999),
+        },
+    );
+    track.insert(
+        "padding".into(),
+        StyleValue::Literal {
+            value: Value::number(4),
+        },
+    );
     track.insert(
         "cursor".into(),
-        StyleValue::Literal(Value::string("pointer")),
+        StyleValue::Literal {
+            value: Value::string("pointer"),
+        },
     );
     rules.insert(ids::TOGGLE_TRACK.into(), track);
 
     let mut thumb: BTreeMap<String, StyleValue> = BTreeMap::new();
-    thumb.insert("background".into(), StyleValue::Ref(ids::BG.into()));
-    thumb.insert("width".into(), StyleValue::Literal(Value::number(28)));
-    thumb.insert("height".into(), StyleValue::Literal(Value::number(28)));
-    thumb.insert("borderRadius".into(), StyleValue::Literal(Value::number(999)));
-    thumb.insert("translateX".into(), StyleValue::Ref(ids::THUMB_X.into()));
+    thumb.insert("background".into(), StyleValue::Ref { id: ids::BG.into() });
+    thumb.insert(
+        "width".into(),
+        StyleValue::Literal {
+            value: Value::number(28),
+        },
+    );
+    thumb.insert(
+        "height".into(),
+        StyleValue::Literal {
+            value: Value::number(28),
+        },
+    );
+    thumb.insert(
+        "borderRadius".into(),
+        StyleValue::Literal {
+            value: Value::number(999),
+        },
+    );
+    thumb.insert(
+        "translateX".into(),
+        StyleValue::Ref {
+            id: ids::THUMB_X.into(),
+        },
+    );
     rules.insert(ids::TOGGLE_THUMB.into(), thumb);
 
     rules

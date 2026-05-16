@@ -151,6 +151,7 @@ export type MiniNodeKind =
   | 'effect'
   | 'doc'
   | 'ui'
+  | 'repeat'
 
 export interface MiniSemanticAnnotation {
   doc: string | null
@@ -162,6 +163,8 @@ export interface MiniRenderNode {
   name: string
   kind: MiniNodeKind
   tag: string | null
+  text: string | null
+  attrs: Record<string, string>
   children: MiniRenderNode[]
   semantic: MiniSemanticAnnotation | null
 }
@@ -202,8 +205,59 @@ export class MiniRuntime {
     return JSON.parse(this.inner.handleEvent(element, event))
   }
 
+  /// Dispatch an event with a payload (typically the new value from a
+  /// change event). Pass `undefined` for no payload.
+  dispatchEvent(element: string, event: string, payload?: MiniValue): MiniPatch[] {
+    const payloadJson = payload === undefined ? '' : JSON.stringify(payload)
+    return JSON.parse(this.inner.dispatchEvent(element, event, payloadJson))
+  }
+
+  /// Replace the runtime's graph with a new payload (e.g. one returned by
+  /// the LLM mini-app generator).
+  loadGraph(payload: MiniGraphPayload): void {
+    this.inner.loadGraph(JSON.stringify(payload))
+  }
+
   /// Cypher-like text dump of the whole graph + current state.
   cypherDump(): string {
     return this.inner.cypherDump()
   }
+
+  /// Current graph payload (round-trippable through loadGraph).
+  graphPayload(): MiniGraphPayload {
+    return JSON.parse(this.inner.graphPayload())
+  }
+}
+
+// Wire-format graph payload. Mirrors the Rust GraphPayload shape; we keep
+// it loose here (the runtime validates).
+export interface MiniGraphPayload {
+  root?: string | null
+  nodes: any[]
+  edges: any[]
+}
+
+export interface MiniGenerationResult {
+  payload: MiniGraphPayload
+  reasoning: string
+  raw: string
+}
+
+/// Hit the server's /api/mini/generate endpoint and return the generated
+/// graph payload. Server URL is fixed at localhost:4000 for v1.
+export async function generateMiniApp(
+  prompt: string,
+  modelId?: string,
+  baseUrl = 'http://localhost:4001',
+): Promise<MiniGenerationResult> {
+  const res = await fetch(`${baseUrl}/api/mini/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, modelId }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`generate failed (${res.status}): ${text}`)
+  }
+  return (await res.json()) as MiniGenerationResult
 }

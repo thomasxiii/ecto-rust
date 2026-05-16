@@ -29,6 +29,7 @@ import {
   getEdge,
 } from './repo.js'
 import { generateView } from './aiViewGenerator.js'
+import { generateMiniApp } from './aiMiniAppGenerator.js'
 import { discoverOllamaModels } from './modelProvider.js'
 import { enhanceSemanticLayer } from './aiSemanticEnhancer.js'
 import { runAgentPrompt, runAgentPromptStreaming, type AgentOperation, type ConversationMessage } from './aiAgentEngine.js'
@@ -162,6 +163,35 @@ app.post<{ Body: { projectId?: string; prompt?: string; modelId?: string } }>(
       return result
     } catch (err) {
       app.log.error({ err }, 'view generation failed')
+      if (err instanceof Anthropic.APIError) {
+        return reply.code(err.status ?? 500).send({
+          error: 'ai_call_failed',
+          message: err.message,
+        })
+      }
+      return reply.code(500).send({
+        error: 'ai_call_failed',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  },
+)
+
+// Mini-runtime app generator. Takes a natural-language prompt, calls Claude
+// with a schema-explaining system prompt, returns a GraphPayload the web
+// shell loads into MiniRuntime via `loadGraph`.
+app.post<{ Body: { prompt?: string; modelId?: string } }>(
+  '/api/mini/generate',
+  async (req, reply) => {
+    const { prompt, modelId } = req.body ?? {}
+    if (!prompt || typeof prompt !== 'string') {
+      return reply.code(400).send({ error: 'prompt is required' })
+    }
+    try {
+      const result = await generateMiniApp({ prompt, modelId })
+      return result
+    } catch (err) {
+      app.log.error({ err }, 'mini app generation failed')
       if (err instanceof Anthropic.APIError) {
         return reply.code(err.status ?? 500).send({
           error: 'ai_call_failed',
