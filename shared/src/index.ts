@@ -50,6 +50,10 @@ export type NodeType =
   | 'ui_layout_surface'
   | 'ui_interaction_surface'
   | 'ui_variant_surface'
+  // npm sidecar — see engine/src/graph/kinds.rs for semantics
+  | 'npm_package'
+  | 'npm_export'
+  | 'server_function'
 
 export type EdgeType =
   // original MVP
@@ -91,6 +95,9 @@ export type EdgeType =
   | 'transitions_to'
   | 'branches_to'
   | 'patches'
+  // npm sidecar — see engine/src/graph/edge.rs for semantics
+  | 'uses_npm_export'
+  | 'wraps_npm_component'
 
 export interface SourceMap {
   filePath?: string
@@ -334,6 +341,61 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { id: 'gpt-4o', provider: 'openai', displayName: 'GPT-4o', isLocal: false },
   { id: 'ollama:qwen2.5-coder:3b', provider: 'ollama', displayName: 'Ecto Local', isLocal: true },
 ]
+
+// ── NPM sidecar types ───────────────────────────────────────────────
+// The npm sidecar lets graphs reference real npm packages. Browser-target
+// packages are bundled into ESM for the preview iframe; server-target
+// packages run inside a Node subprocess. See server/src/bundler/ and the
+// 'npm_package' / 'npm_export' / 'server_function' node kinds.
+
+export type NpmTarget = 'browser' | 'server'
+
+export interface NpmPackageData {
+  name: string
+  version: string
+  target: NpmTarget
+  // The set of named exports the graph references. The bundler tree-shakes
+  // unused exports; this list drives the entry shim it generates.
+  exports: string[]
+  // Populated after a successful build; identifies the bundle on disk.
+  bundleHash?: string
+  bundleStatus?: 'pending' | 'building' | 'ready' | 'error'
+  bundleError?: string
+}
+
+export type NpmExportKind = 'component' | 'hook' | 'function' | 'value'
+
+export interface NpmExportData {
+  exportName: string
+  kind: NpmExportKind
+  // For default exports, exportName === 'default'.
+  isDefault?: boolean
+}
+
+export interface ServerFunctionData {
+  // JS body executed in the sidecar. Receives `({ args, ctx })`, where
+  // ctx exposes resolved npm imports keyed by export id. Returns JSON-
+  // serializable value.
+  body: string
+  params: { name: string; jsType?: string }[]
+  returnShape?: 'value' | 'stream' | 'void'
+}
+
+export interface BundleBuildRequest {
+  target: NpmTarget
+  name: string
+  version: string
+  exports: string[]
+}
+
+export interface BundleBuildResponse {
+  hash: string
+  target: NpmTarget
+  url: string
+  bytes: number
+  cached: boolean
+  durationMs: number
+}
 
 // ── Platform adapter contracts ───────────────────────────────────────
 

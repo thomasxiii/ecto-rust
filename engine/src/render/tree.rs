@@ -56,6 +56,25 @@ pub struct RenderMetadata {
     pub is_custom_component: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_name: Option<String>,
+    /// When this element is a JSX wrapper for an npm component (linked
+    /// via a `wraps_npm_component` edge to an NpmExport), this carries
+    /// the bundle request and which export to mount. The preview layer
+    /// dynamic-imports the bundle and renders the resolved export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_component: Option<NpmComponentRef>,
+}
+
+/// Embedded in `RenderMetadata` for elements that wrap an npm component.
+/// Shape is wire-compatible with @ecto/shared's `BundleBuildRequest` plus
+/// the chosen export name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NpmComponentRef {
+    pub package_name: String,
+    pub package_version: String,
+    pub target: String, // "browser"
+    pub exports: Vec<String>,
+    pub export_name: String,
 }
 
 const MAX_DEPTH: usize = 80;
@@ -230,6 +249,7 @@ impl<'a> Ctx<'a> {
         };
 
         let render_key = self.make_render_key(&el.id);
+        let npm_component = self.resolve_npm_component_ref(&el.id);
         Some(RenderTreeNode {
             id: el.id.clone(),
             render_key,
@@ -240,8 +260,77 @@ impl<'a> Ctx<'a> {
             children,
             metadata: RenderMetadata {
                 is_custom_component: Some(is_custom),
+                npm_component,
                 ..Default::default()
             },
+        })
+    }
+
+    /// If this element has a `wraps_npm_component` outgoing edge, build a
+    /// NpmComponentRef from the linked NpmExport and its parent NpmPackage.
+    /// Returns None when no such edge exists.
+    fn resolve_npm_component_ref(&self, el_id: &str) -> Option<NpmComponentRef> {
+        let wrap_edge = self
+            .normalized
+            .first_out_by(el_id, EdgeKind::WrapsNpmComponent)?;
+        let export = self.graph.node(&wrap_edge.to_node_id)?;
+        if export.kind != NodeKind::NpmExport {
+            return None;
+        }
+        let export_name = export
+            .data
+            .get("exportName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&export.name)
+            .to_string();
+        // The NpmExport node is `contains`-ed by an NpmPackage. The package
+        // is the source of name/version/exports for the bundler.
+        let pkg = self
+            .normalized
+            .in_by(&export.id, EdgeKind::Contains)
+            .into_iter()
+            .find_map(|e| {
+                let parent = self.graph.node(&e.from_node_id)?;
+                if parent.kind == NodeKind::NpmPackage {
+                    Some(parent)
+                } else {
+                    None
+                }
+            })?;
+        let package_name = pkg
+            .data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&pkg.name)
+            .to_string();
+        let package_version = pkg
+            .data
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("latest")
+            .to_string();
+        let target = pkg
+            .data
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("browser")
+            .to_string();
+        let exports: Vec<String> = pkg
+            .data
+            .get("exports")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![export_name.clone()]);
+        Some(NpmComponentRef {
+            package_name,
+            package_version,
+            target,
+            exports,
+            export_name,
         })
     }
 
@@ -460,5 +549,46 @@ mod tests {
             Some("div"),
             "should chase through Import to land on Card → div"
         );
+    }
+
+    #[test]
+    fn wraps_npm_component_emits_metadata() {
+        // App renders <Confetti/> which has `wraps_npm_component` →
+        // NpmExport `Confetti`, which is contained by NpmPackage
+        // `react-confetti@^6.1.0`. The render tree should carry the
+        // bundle info in metadata.npmComponent so the preview can
+        // dynamic-import the bundle.
+        let mut g = Graph::new();
+        g.insert_node(Node::new("app", NodeKind::Component, "App"));
+        g.insert_node(
+            Node::new("wrap", NodeKind::Element, "Confetti")
+                .with_data(json!({ "tagName": "div" })),
+        );
+        g.insert_node(
+            Node::new("pkg", NodeKind::NpmPackage, "react-confetti").with_data(json!({
+                "name": "react-confetti",
+                "version": "^6.1.0",
+                "target": "browser",
+                "exports": ["default"]
+            })),
+        );
+        g.insert_node(
+            Node::new("exp", NodeKind::NpmExport, "Confetti").with_data(json!({
+                "exportName": "default",
+                "kind": "component",
+                "isDefault": true
+            })),
+        );
+        g.insert_edge(Edge::new("r1", "app", "wrap", EdgeKind::Renders));
+        g.insert_edge(Edge::new("c1", "pkg", "exp", EdgeKind::Contains));
+        g.insert_edge(Edge::new("w1", "wrap", "exp", EdgeKind::WrapsNpmComponent));
+
+        let tree = walk_render_tree(&g, "app").expect("tree built");
+        let r = tree.metadata.npm_component.expect("npm metadata emitted");
+        assert_eq!(r.package_name, "react-confetti");
+        assert_eq!(r.package_version, "^6.1.0");
+        assert_eq!(r.target, "browser");
+        assert_eq!(r.export_name, "default");
+        assert_eq!(r.exports, vec!["default".to_string()]);
     }
 }

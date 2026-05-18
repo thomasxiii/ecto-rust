@@ -43,6 +43,24 @@ export type GraphEdge = {
 
 export type GraphPayload = { nodes: GraphNode[]; edges: GraphEdge[] }
 
+export type NpmComponentRef = {
+  packageName: string
+  packageVersion: string
+  target: 'browser' | 'server'
+  exports: string[]
+  exportName: string
+}
+
+export type RenderMetadata = {
+  callSiteNodeId?: string
+  isCustomComponent?: boolean
+  componentName?: string
+  // Set when this element wraps an npm component via a
+  // `wraps_npm_component` edge. The preview dynamic-imports the bundle
+  // and mounts the export.
+  npmComponent?: NpmComponentRef
+}
+
 export type RenderTreeNode = {
   /** Source graph node ID — repeats when a component is rendered more than once. Use for selection / live edits. */
   id: string
@@ -53,7 +71,7 @@ export type RenderTreeNode = {
   props: Record<string, unknown>
   styleDeclarations: { property: string; value: string }[]
   children: RenderTreeNode[]
-  metadata: Record<string, unknown>
+  metadata: RenderMetadata
 }
 
 export type ImportResult = {

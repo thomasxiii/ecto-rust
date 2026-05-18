@@ -1,13 +1,17 @@
 import { loadEnvLocal } from './loadEnv.js'
 loadEnvLocal()
 
+import path from 'node:path'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
+import fastifyStatic from '@fastify/static'
 import Anthropic from '@anthropic-ai/sdk'
 import { Server as SocketIOServer } from 'socket.io'
-import type { GraphEvent, GraphMutation, ImportRequest } from '@ecto/shared'
+import type { BundleBuildRequest, GraphEvent, GraphMutation, ImportRequest } from '@ecto/shared'
 import { SOCKET, projectRoom } from '@ecto/shared'
+import { getBundler } from './bundler/index.js'
+import { getSidecarHost, type SidecarImport } from './sidecar/host.js'
 import {
   createRevision,
   deleteProject,
@@ -41,9 +45,72 @@ const app = Fastify({ logger: true, bodyLimit: 256 * 1024 * 1024 })
 await app.register(cors, { origin: true })
 await app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } }) // 50MB max audio
 
+// Serve compiled npm bundles for the browser sidecar. The cache dir lives
+// alongside the server's cwd (.bundle-cache/browser/<hash>.mjs).
+const bundler = getBundler()
+await bundler.ensureCacheDirs()
+await app.register(fastifyStatic, {
+  root: path.resolve(process.cwd(), '.bundle-cache', 'browser'),
+  prefix: '/bundles/',
+  decorateReply: false,
+  // Bundles are content-addressed: safe to cache aggressively.
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  },
+})
+
 // ─── REST ────────────────────────────────────────────────────────────────
 
 app.get('/health', async () => ({ ok: true }))
+
+// ─── NPM sidecar bundler ─────────────────────────────────────────────────
+//
+// POST /api/bundles/build  — compile a package on demand and return its
+//   content-addressed hash + URL. Idempotent across calls (CAS).
+// GET  /bundles/:hash.mjs  — served via @fastify/static above.
+
+app.post<{ Body: BundleBuildRequest }>(
+  '/api/bundles/build',
+  async (req, reply) => {
+    const { target, name, version, exports } = req.body ?? ({} as BundleBuildRequest)
+    if (!target || !name || !version || !Array.isArray(exports)) {
+      return reply.code(400).send({ error: 'bad_request', message: 'expected { target, name, version, exports[] }' })
+    }
+    if (target !== 'browser' && target !== 'server') {
+      return reply.code(400).send({ error: 'bad_request', message: 'target must be "browser" or "server"' })
+    }
+    try {
+      const result = await bundler.build({ target, name, version, exports })
+      return result
+    } catch (err) {
+      req.log.error({ err }, 'bundle build failed')
+      return reply.code(500).send({ error: 'build_failed', message: err instanceof Error ? err.message : String(err) })
+    }
+  },
+)
+
+// Invoke a ServerFunction body in the Node sidecar subprocess. The body
+// runs in a vm-sandboxed scope; `ctx` carries the resolved npm imports.
+app.post<{
+  Body: {
+    body: string
+    args?: Record<string, unknown>
+    imports?: SidecarImport[]
+  }
+}>('/api/server-fn/invoke', async (req, reply) => {
+  const { body, args, imports } = req.body ?? ({} as { body: string })
+  if (typeof body !== 'string') {
+    return reply.code(400).send({ error: 'bad_request', message: 'body must be a string' })
+  }
+  const sidecar = getSidecarHost()
+  const out = await sidecar.invoke({
+    fn: { body, params: [] },
+    args: args ?? {},
+    imports: imports ?? [],
+  })
+  if (out.ok) return out
+  return reply.code(500).send(out)
+})
 
 app.get('/projects', async () => ({ projects: listProjects() }))
 
@@ -471,6 +538,23 @@ app.post<{
 })
 
 // ─── WebSocket ───────────────────────────────────────────────────────────
+
+// Ensure the sidecar gets torn down with the parent. SIGTERM/SIGINT cover
+// nodemon restart, container shutdown, and Ctrl-C. process.on('exit') is
+// the last-resort fallback for unhandled exits.
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    try {
+      getSidecarHost().shutdown()
+    } catch {}
+    process.exit(0)
+  })
+}
+process.on('exit', () => {
+  try {
+    getSidecarHost().shutdown()
+  } catch {}
+})
 
 await app.listen({ port: PORT, host: '0.0.0.0' })
 

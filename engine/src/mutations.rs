@@ -481,6 +481,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_op_accepts_npm_sidecar_kinds() {
+        // The Stormbase loader synthesizes npm_package / npm_export /
+        // server_function nodes via agent ops. Make sure the validator
+        // accepts the new snake_case wire kinds.
+        let mut g = seeded();
+        for kind in ["npm_package", "npm_export", "server_function"] {
+            let op = AgentGraphOp {
+                op: AgentOpKind::AddNode,
+                id: Some(format!("n-{kind}")),
+                node_type: Some(kind.into()),
+                name: Some(kind.into()),
+                data: Some(json!({})),
+                edge_id: None,
+                from: None,
+                to: None,
+                edge_type: None,
+                order: None,
+                node_id: None,
+                patch: None,
+                target_id: None,
+            };
+            apply_agent_op(&mut g, "p", &op).unwrap_or_else(|e| panic!("failed for {kind}: {e}"));
+        }
+        for kind in ["uses_npm_export", "wraps_npm_component"] {
+            let op = AgentGraphOp {
+                op: AgentOpKind::AddEdge,
+                id: None,
+                node_type: None,
+                name: None,
+                data: None,
+                edge_id: Some(format!("e-{kind}")),
+                from: Some("c1".into()),
+                to: format!("n-npm_export").into(),
+                edge_type: Some(kind.into()),
+                order: None,
+                node_id: None,
+                patch: None,
+                target_id: None,
+            };
+            apply_agent_op(&mut g, "p", &op).unwrap_or_else(|e| panic!("failed for {kind}: {e}"));
+        }
+    }
+
+    #[test]
     fn agent_op_rejects_unknown_node_kind() {
         let mut g = seeded();
         let op = AgentGraphOp {

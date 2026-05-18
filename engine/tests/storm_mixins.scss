@@ -1,0 +1,14 @@
+@mixin card {
+  background: $bg-elev;
+  border: 1px solid $border;
+  border-radius: $radius;
+  box-shadow: $shadow-sm;
+}
+@mixin pill {
+  display: inline-flex;
+  padding: 2px 10px;
+  font-size: 12px;
+  border-radius: $radius-pill;
+  background: $bg-soft;
+  color: $ink-dim;
+}

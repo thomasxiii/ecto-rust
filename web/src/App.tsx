@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Engine, ensureEngineReady, type GraphNode, type GraphPayload, type RenderTreeNode } from './engine'
 import { TINY_REACT_APP } from './fixture'
 import { MiniAppView } from './MiniAppView'
+import { NpmSandbox } from './NpmSandbox'
+import { importStormbase } from './stormbaseLoader'
 import { tokens } from './ui'
 import { Preview } from './Preview'
 import { PromptToolbar } from './PromptToolbar'
@@ -16,7 +18,7 @@ import {
 
 const LOCAL_PROJECT_ID = 'local-demo'
 
-type View = 'engine' | 'mini-toggle'
+type View = 'engine' | 'mini-toggle' | 'npm-sandbox'
 
 export function App() {
   const [view, setView] = useState<View>('engine')
@@ -24,10 +26,24 @@ export function App() {
   if (view === 'mini-toggle') {
     return <MiniAppView onBack={() => setView('engine')} />
   }
-  return <EngineView onOpenMiniToggle={() => setView('mini-toggle')} />
+  if (view === 'npm-sandbox') {
+    return <NpmSandbox onBack={() => setView('engine')} />
+  }
+  return (
+    <EngineView
+      onOpenMiniToggle={() => setView('mini-toggle')}
+      onOpenNpmSandbox={() => setView('npm-sandbox')}
+    />
+  )
 }
 
-function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
+function EngineView({
+  onOpenMiniToggle,
+  onOpenNpmSandbox,
+}: {
+  onOpenMiniToggle: () => void
+  onOpenNpmSandbox: () => void
+}) {
   const engineRef = useRef<Engine | null>(null)
   const [ready, setReady] = useState(false)
   const [graph, setGraph] = useState<GraphPayload>({ nodes: [], edges: [] })
@@ -43,10 +59,22 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
   const [revision, setRevision] = useState(0)
 
   useEffect(() => {
+    // StrictMode runs effects twice in dev. Skip re-init if we already
+    // have an Engine — otherwise we end up with two WasmEngine
+    // instances and a stale engineRef, which (on at least one build of
+    // wasm-bindgen) can manifest as "RefCell already borrowed" panics
+    // on the next call.
+    if (engineRef.current) return
+    let cancelled = false
     ensureEngineReady().then(() => {
+      if (cancelled) return
+      if (engineRef.current) return
       engineRef.current = new Engine()
       setReady(true)
     })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // Subscribe to the project's room over socket.io. The server
@@ -138,6 +166,40 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
     } catch (err) {
       console.warn('[ecto] server unreachable — running in local-only mode', err)
       setProjectId(LOCAL_PROJECT_ID)
+    }
+  }
+
+  const importStormbaseProject = async () => {
+    const eng = engineRef.current
+    if (!eng) return
+    const localPid = LOCAL_PROJECT_ID
+    setProjectId(localPid)
+    let out
+    try {
+      console.log('[ecto] stormbase: importFiles starting...')
+      out = importStormbase(eng, localPid)
+      console.log('[ecto] stormbase: import ok', {
+        entry: out.importResult.entryNodeId,
+        nodes: out.graph.nodes.length,
+        edges: out.graph.edges.length,
+      })
+    } catch (err) {
+      console.error('[ecto] stormbase: importStormbase failed', err)
+      return
+    }
+    setEntryId(out.importResult.entryNodeId)
+    setRevision((r) => r + 1)
+    try {
+      const resp = await postImport({
+        projectName: 'stormbase',
+        rootPathLabel: 'stormbase',
+        nodes: out.graph.nodes,
+        edges: out.graph.edges,
+        entryNodeId: out.importResult.entryNodeId,
+      })
+      setProjectId(resp.project.id)
+    } catch (err) {
+      console.warn('[ecto] server unreachable — Stormbase running in local-only mode', err)
     }
   }
 
@@ -244,6 +306,14 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
             {ready ? 'Import demo project' : 'Loading WASM…'}
           </button>
           <button
+            onClick={importStormbaseProject}
+            disabled={!ready}
+            className="ec-btn ec-btn-secondary"
+            style={{ width: '100%' }}
+          >
+            Load Stormbase sample
+          </button>
+          <button
             onClick={buildSemanticLayer}
             className="ec-btn ec-btn-secondary"
             style={{ width: '100%' }}
@@ -257,6 +327,13 @@ function EngineView({ onOpenMiniToggle }: { onOpenMiniToggle: () => void }) {
             style={{ width: '100%' }}
           >
             Open mini-runtime apps →
+          </button>
+          <button
+            onClick={onOpenNpmSandbox}
+            className="ec-btn ec-btn-secondary"
+            style={{ width: '100%' }}
+          >
+            NPM sidecar sandbox →
           </button>
         </div>
         <div style={{ marginTop: 16, fontSize: 11, color: tokens.fgMuted }}>

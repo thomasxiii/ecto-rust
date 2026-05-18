@@ -44,6 +44,16 @@ pub enum EdgeKind {
     TransitionsTo,
     BranchesTo,
     Patches,
+    // ── npm sidecar
+    //
+    // UsesNpmExport: links a graph node (typically a ServerFunction or
+    //   Element) to an NpmExport node it depends on at runtime.
+    // WrapsNpmComponent: marks an Element as a JSX wrapper for a specific
+    //   NpmExport of kind "component". The render pipeline emits a
+    //   suspense-loaded placeholder that the preview iframe resolves by
+    //   dynamic-importing the package bundle.
+    UsesNpmExport,
+    WrapsNpmComponent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,5 +126,18 @@ mod tests {
         assert!(s.contains("\"fromNodeId\":\"n1\""));
         assert!(s.contains("\"toNodeId\":\"n2\""));
         assert!(s.contains("\"order\":0"));
+    }
+
+    #[test]
+    fn npm_edge_kinds_round_trip() {
+        for (kind, wire) in [
+            (EdgeKind::UsesNpmExport, "\"uses_npm_export\""),
+            (EdgeKind::WrapsNpmComponent, "\"wraps_npm_component\""),
+        ] {
+            let s = serde_json::to_string(&kind).unwrap();
+            assert_eq!(s, wire);
+            let back: EdgeKind = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 }
