@@ -3,6 +3,12 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  // Force a single React instance across pre-bundled deps (eg.
+  // @monaco-editor/react was previously pulling in its own copy and
+  // crashing with "Cannot read properties of null (reading 'useState')").
+  resolve: {
+    dedupe: ['react', 'react-dom'],
+  },
   server: {
     port: 5173,
     fs: {
@@ -14,5 +20,6 @@ export default defineConfig({
   assetsInclude: ['**/*.wasm'],
   optimizeDeps: {
     exclude: ['./src/wasm/ecto_engine.js'],
+    include: ['react', 'react-dom', 'react-dom/client', '@monaco-editor/react'],
   },
 })

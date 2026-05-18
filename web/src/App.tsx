@@ -3,6 +3,7 @@ import { Engine, ensureEngineReady, type GraphNode, type GraphPayload, type Rend
 import { TINY_REACT_APP } from './fixture'
 import { MiniAppView } from './MiniAppView'
 import { NpmSandbox } from './NpmSandbox'
+import { EctoStudio } from './components/EctoStudio'
 import { importStormbase } from './stormbaseLoader'
 import { tokens } from './ui'
 import { Preview } from './Preview'
@@ -18,7 +19,7 @@ import {
 
 const LOCAL_PROJECT_ID = 'local-demo'
 
-type View = 'engine' | 'mini-toggle' | 'npm-sandbox'
+type View = 'engine' | 'mini-toggle' | 'npm-sandbox' | 'ectoscript'
 
 export function App() {
   const [view, setView] = useState<View>('engine')
@@ -29,10 +30,14 @@ export function App() {
   if (view === 'npm-sandbox') {
     return <NpmSandbox onBack={() => setView('engine')} />
   }
+  if (view === 'ectoscript') {
+    return <EctoStudio onBack={() => setView('engine')} />
+  }
   return (
     <EngineView
       onOpenMiniToggle={() => setView('mini-toggle')}
       onOpenNpmSandbox={() => setView('npm-sandbox')}
+      onOpenEctoStudio={() => setView('ectoscript')}
     />
   )
 }
@@ -40,9 +45,11 @@ export function App() {
 function EngineView({
   onOpenMiniToggle,
   onOpenNpmSandbox,
+  onOpenEctoStudio,
 }: {
   onOpenMiniToggle: () => void
   onOpenNpmSandbox: () => void
+  onOpenEctoStudio: () => void
 }) {
   const engineRef = useRef<Engine | null>(null)
   const [ready, setReady] = useState(false)
@@ -297,6 +304,17 @@ function EngineView({
             : 'no project'}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button
+            onClick={onOpenEctoStudio}
+            className="ec-btn"
+            style={{
+              width: '100%',
+              background: 'linear-gradient(135deg, #2563eb, #7c3aed)',
+              borderColor: 'transparent',
+            }}
+          >
+            Write EctoScript →
+          </button>
           <button
             onClick={importDemo}
             disabled={!ready}
