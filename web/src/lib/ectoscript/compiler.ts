@@ -12,9 +12,11 @@ import type {
   ElementNode,
   ModelDecl,
   ParseResult,
+  QueryDecl,
   StateDecl,
   StylesDecl,
   TokenDecl,
+  ValueExpr,
 } from './parser'
 import type { EctoEdge, EctoEdgeType, EctoGraph, EctoNode, EctoNodeType } from './graph'
 
@@ -28,6 +30,17 @@ export interface CompileResult {
   tokens: Record<string, string> // tokenName → tokenNodeId
   derived: Record<string, string>
   styles: Record<string, string>
+  // queryName → { sourcePath, filters }. The runtime evaluates queries
+  // by reading the source atom and applying filters against current
+  // atom values. Stored separately from the graph for fast eval.
+  queries: Record<
+    string,
+    {
+      nodeId: string
+      source: string[]
+      filters: { field: string; value: ValueExpr }[]
+    }
+  >
 }
 
 export function compile(parsed: ParseResult): CompileResult {
@@ -40,6 +53,7 @@ export function compile(parsed: ParseResult): CompileResult {
   const tokens: CompileResult['tokens'] = {}
   const derived: CompileResult['derived'] = {}
   const styles: CompileResult['styles'] = {}
+  const queries: CompileResult['queries'] = {}
 
   let nextId = 0
   const id = (prefix: string) => `${prefix}_${++nextId}`
@@ -123,6 +137,25 @@ export function compile(parsed: ParseResult): CompileResult {
     })
   }
 
+  // pass 1.75: queries — a Query node + edges to source/filter atoms.
+  for (const decl of parsed.decls) {
+    if (decl.kind !== 'query') continue
+    const q = decl as QueryDecl
+    const qNode = addNode('Query', q.name, {
+      source: q.source,
+      filters: q.filters.map((f) => ({ field: f.field, value: f.value })),
+    })
+    queries[q.name] = { nodeId: qNode.id, source: q.source, filters: q.filters }
+    const sourceAtomId = resolveAtomId(q.source.join('.'), '', models)
+    if (sourceAtomId) addEdge(qNode.id, sourceAtomId, 'QUERIES')
+    for (const f of q.filters) {
+      if (f.value.kind === 'path') {
+        const refId = resolveAtomId(f.value.segments.join('.'), '', models)
+        if (refId) addEdge(qNode.id, refId, 'FILTERS_BY')
+      }
+    }
+  }
+
   // ---- pass 2: components -------------------------------------------
   for (const decl of parsed.decls) {
     if (decl.kind !== 'component') continue
@@ -188,12 +221,27 @@ export function compile(parsed: ParseResult): CompileResult {
     : null
 
   function compileElement(el: ElementNode, parentId: string, componentName: string): string {
-    const elNode = addNode('Element', el.name, {
+    const isLoop = el.name === 'for'
+    const elNode = addNode(isLoop ? 'Loop' : 'Element', el.name, {
       name: el.name,
       when: el.when,
       traits: el.traits,
+      loopVar: el.loopVar,
+      loopSource: el.loopSource,
+      attrs: el.attrs,
     })
     if (parentId) addEdge(parentId, elNode.id, 'HAS_CHILD')
+
+    if (isLoop && el.loopSource) {
+      const srcPath = el.loopSource.join('.')
+      const srcAtomId = resolveAtomId(srcPath, componentName, models)
+      if (srcAtomId) addEdge(elNode.id, srcAtomId, 'ITERATES')
+      else {
+        // Could be a query name
+        const q = queries[srcPath]
+        if (q) addEdge(elNode.id, q.nodeId, 'ITERATES')
+      }
+    }
 
     for (const styleName of el.styles) {
       if (styles[styleName]) addEdge(elNode.id, styles[styleName], 'USES_STYLE')
@@ -203,9 +251,14 @@ export function compile(parsed: ParseResult): CompileResult {
       addEdge(elNode.id, t.id, 'HAS_TRAIT')
     }
     if (el.when) {
-      const cond = addNode('Condition', `when ${el.when}`, { atom: el.when })
+      const w = el.when
+      const label =
+        w.op === 'truthy'
+          ? `when ${w.path.join('.')}`
+          : `when ${w.path.join('.')} is ${literalLabel(w.literal)}`
+      const cond = addNode('Condition', label, { when: w })
       addEdge(elNode.id, cond.id, 'HAS_TRAIT')
-      const atomId = resolveAtomId(el.when, componentName, models)
+      const atomId = resolveAtomId(w.path.join('.'), componentName, models)
       if (atomId) addEdge(cond.id, atomId, 'READS')
     }
 
@@ -226,13 +279,7 @@ export function compile(parsed: ParseResult): CompileResult {
       const evNode = addNode('Event', ev.event, { event: ev.event })
       addEdge(elNode.id, evNode.id, 'HAS_EVENT')
       for (const a of ev.actions as ActionNode[]) {
-        const aNode = addNode('Action', `${a.op} ${a.target.join('.')}`, {
-          op: a.op,
-          target: a.target,
-        })
-        addEdge(evNode.id, aNode.id, 'TRIGGERS')
-        const atomId = resolveAtomId(a.target.join('.'), componentName, models)
-        if (atomId) addEdge(aNode.id, atomId, 'WRITES')
+        compileAction(a, evNode.id, componentName)
       }
     }
 
@@ -240,6 +287,59 @@ export function compile(parsed: ParseResult): CompileResult {
       compileElement(child, elNode.id, componentName)
     }
     return elNode.id
+  }
+
+  function compileAction(a: ActionNode, evNodeId: string, componentName: string): void {
+    const label =
+      a.op === 'add'
+        ? `add to ${a.target.join('.')}`
+        : a.op === 'clear'
+        ? `clear ${a.target.join('.')}`
+        : `${a.op} ${a.target.join('.')}`
+    const aNode = addNode('Action', label, {
+      op: a.op,
+      target: a.target,
+      // Persist value/fields so the runtime can act on them without
+      // re-parsing.
+      ...(a.op === 'set' ? { value: a.value } : {}),
+      ...(a.op === 'add' ? { fields: a.fields } : {}),
+    })
+    addEdge(evNodeId, aNode.id, 'TRIGGERS')
+    const atomId = resolveAtomId(a.target.join('.'), componentName, models)
+    if (atomId) addEdge(aNode.id, atomId, 'WRITES')
+
+    // Inline `match` expressions in `add` field values get a Cognition
+    // node so they show up in the graph view.
+    if (a.op === 'add') {
+      for (const f of a.fields) {
+        if (f.value.kind === 'match') {
+          const cog = addNode('Cognition', `match → ${f.name}`, {
+            kind: 'match',
+            field: f.value.field,
+            input: f.value.input,
+            collection: f.value.collection,
+          })
+          addEdge(aNode.id, cog.id, 'TRIGGERS')
+          const inAtom = resolveAtomId(f.value.input.join('.'), componentName, models)
+          if (inAtom) addEdge(cog.id, inAtom, 'READS')
+          const collAtom = resolveAtomId(f.value.collection.join('.'), componentName, models)
+          if (collAtom) addEdge(cog.id, collAtom, 'MATCHES_AGAINST')
+        }
+      }
+    }
+    if (a.op === 'set' && a.value.kind === 'match') {
+      const cog = addNode('Cognition', `match → ${a.target.join('.')}`, {
+        kind: 'match',
+        field: a.value.field,
+        input: a.value.input,
+        collection: a.value.collection,
+      })
+      addEdge(aNode.id, cog.id, 'TRIGGERS')
+      const inAtom = resolveAtomId(a.value.input.join('.'), componentName, models)
+      if (inAtom) addEdge(cog.id, inAtom, 'READS')
+      const collAtom = resolveAtomId(a.value.collection.join('.'), componentName, models)
+      if (collAtom) addEdge(cog.id, collAtom, 'MATCHES_AGAINST')
+    }
   }
 
   return {
@@ -251,6 +351,27 @@ export function compile(parsed: ParseResult): CompileResult {
     tokens,
     derived,
     styles,
+    queries,
+  }
+}
+
+function literalLabel(lit: any): string {
+  if (!lit) return ''
+  switch (lit.kind) {
+    case 'string':
+      return JSON.stringify(lit.value)
+    case 'bool':
+    case 'number':
+    case 'color':
+      return String(lit.value)
+    case 'ident':
+      return lit.name
+    case 'qualified':
+      return lit.segments.join('.')
+    case 'null':
+      return 'null'
+    default:
+      return ''
   }
 }
 

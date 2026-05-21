@@ -15,6 +15,9 @@ export type EctoNodeType =
   | 'Binding'
   | 'Condition'
   | 'Trait'
+  | 'Query'
+  | 'Loop'
+  | 'Cognition'
 
 export type EctoEdgeType =
   | 'HAS_STATE'
@@ -30,6 +33,10 @@ export type EctoEdgeType =
   | 'HAS_TRAIT'
   | 'USES_TOKEN'
   | 'DERIVES_FROM'
+  | 'QUERIES'
+  | 'FILTERS_BY'
+  | 'ITERATES'
+  | 'MATCHES_AGAINST'
 
 export interface EctoNode {
   id: string
@@ -63,4 +70,7 @@ export const NODE_TYPE_COLORS: Record<EctoNodeType, string> = {
   Binding: '#22d3ee',
   Condition: '#facc15',
   Trait: '#94a3b8',
+  Query: '#a3e635',
+  Loop: '#fbbf24',
+  Cognition: '#e879f9',
 }

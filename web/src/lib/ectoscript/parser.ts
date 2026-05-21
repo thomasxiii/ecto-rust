@@ -34,7 +34,23 @@ export type Literal =
   | { kind: 'unit'; value: number; unit: string } // 12px, 1rem, 100%
   | { kind: 'ident'; name: string }
   | { kind: 'qualified'; segments: string[] } // Theme.darkMode, Black.20
+  | { kind: 'list'; items: Literal[] } // [] — collection state
+  | { kind: 'null' }
   | { kind: 'raw'; value: string } // unrecognized — keep verbatim
+
+// A value expression — used in action targets (`set X = Y`), record
+// fields in `add` actions, and query filter rhs. Strictly more
+// expressive than a Literal because it can reference atom paths and
+// the cognitive `match` primitive.
+export type ValueExpr =
+  | { kind: 'literal'; value: Literal }
+  | { kind: 'path'; segments: string[] }
+  | {
+      kind: 'match'
+      input: string[]
+      collection: string[]
+      field: string
+    }
 
 export interface Pos {
   line: number
@@ -84,15 +100,22 @@ export interface ElementNode {
   kind: 'element'
   name: string
   pos: Pos
-  // visibility — `when <atom>`
-  when?: string
+  // visibility
+  when?:
+    | { op: 'truthy'; path: string[] }
+    | { op: 'equals'; path: string[]; literal: Literal }
   styles: string[]
   traits: string[]
   // event handlers — `on click { toggle X }`
   events: EventHandler[]
   // simple per-element bindings — `checked binds TaskModel.checked`
   bindings: BindingDecl[]
+  // Static attrs — `text: "Add Project"`, `placeholder: "Title..."`.
+  attrs: Record<string, Literal>
   children: ElementNode[]
+  // For loop — populated when `name === 'for'`.
+  loopVar?: string
+  loopSource?: string[] // dotted path: ['TaskModel', 'tasks'] or ['CurrentTasks']
 }
 
 export interface EventHandler {
@@ -102,12 +125,18 @@ export interface EventHandler {
   actions: ActionNode[]
 }
 
-export interface ActionNode {
-  kind: 'action'
-  op: 'toggle' | 'set'
-  target: string[] // dotted path
-  pos: Pos
-}
+export type ActionNode =
+  | { kind: 'action'; op: 'toggle'; target: string[]; pos: Pos }
+  | { kind: 'action'; op: 'set'; target: string[]; value: ValueExpr; pos: Pos }
+  | { kind: 'action'; op: 'clear'; target: string[]; pos: Pos }
+  | {
+      kind: 'action'
+      op: 'add'
+      // target is the collection atom path, e.g. ['TaskModel', 'tasks']
+      target: string[]
+      fields: { name: string; value: ValueExpr }[]
+      pos: Pos
+    }
 
 export interface BindingDecl {
   kind: 'binding'
@@ -148,12 +177,23 @@ export interface StylesDecl {
   props: { name: string; value: Literal[] }[]
 }
 
+export interface QueryDecl {
+  kind: 'query'
+  name: string
+  pos: Pos
+  // Source collection — dotted atom path, e.g. ['TaskModel', 'tasks']
+  source: string[]
+  // Conjunctive filters — `where field is value-expr`
+  filters: { field: string; value: ValueExpr; pos: Pos }[]
+}
+
 export type TopDecl =
   | ModelDecl
   | ComponentDecl
   | TokenDecl
   | DerivedDecl
   | StylesDecl
+  | QueryDecl
 
 export interface ParseResult {
   decls: TopDecl[]
@@ -169,6 +209,8 @@ const QUALIFIED_RE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_0-9]+)+$/
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 function literalFromToken(tok: string): Literal {
+  if (tok === '[]') return { kind: 'list', items: [] }
+  if (tok === 'null') return { kind: 'null' }
   if (tok.startsWith('"') && tok.endsWith('"')) {
     return { kind: 'string', value: tok.slice(1, -1) }
   }
@@ -329,6 +371,8 @@ function parseTopDecl(n: OutlineNode): TopDecl | null {
       return parseDerived(rest, pos)
     case 'styles':
       return parseStyles(n, rest, pos)
+    case 'query':
+      return parseQuery(n, rest, pos)
     default:
       throw new Error(`Unexpected top-level statement: "${n.raw.text}"`)
   }
@@ -405,12 +449,54 @@ function parseElement(n: OutlineNode): ElementNode {
     traits: [],
     events: [],
     bindings: [],
+    attrs: {},
     children: [],
   }
+  // `< for task in CurrentTasks` — loop over a collection.
+  if (name === 'for') {
+    const inIdx = tokens.indexOf('in')
+    if (inIdx < 0 || inIdx + 1 >= tokens.length) {
+      throw new Error(`Expected "for <var> in <collection>" at line ${pos.line}`)
+    }
+    el.loopVar = expectIdent(tokens[2], 'loop variable', pos)
+    const sourceTok = tokens[inIdx + 1]
+    if (!sourceTok) throw new Error(`for loop: missing collection at line ${pos.line}`)
+    el.loopSource = sourceTok.split('.')
+  }
+  // Walk through inline modifiers (when, binds). We track the last
+  // token index consumed by a previous modifier so that the prop for a
+  // subsequent `binds` doesn't pick up a token that was part of `when`.
+  let consumedUpTo = 1 // tokens[0] = '<', tokens[1] = element name
   for (let i = 2; i < tokens.length; i++) {
     if (tokens[i] === 'when' && tokens[i + 1]) {
-      el.when = tokens[i + 1]
-      i++
+      const pathTok = tokens[i + 1]
+      if (tokens[i + 2] === 'is' && tokens[i + 3]) {
+        el.when = {
+          op: 'equals',
+          path: pathTok.split('.'),
+          literal: literalFromToken(tokens[i + 3]),
+        }
+        consumedUpTo = i + 3
+        i += 3
+      } else {
+        el.when = { op: 'truthy', path: pathTok.split('.') }
+        consumedUpTo = i + 1
+        i += 1
+      }
+    } else if (tokens[i] === 'binds' && tokens[i + 1]) {
+      // `< text binds X`  → prop defaults to `text` (the element name).
+      // `< input value binds X`  → prop is the preceding word.
+      // If the preceding token was part of a `when X [is Y]`, fall back
+      // to the default since there's no real prop word.
+      const prop = i - 1 > consumedUpTo ? tokens[i - 1] : 'text'
+      el.bindings.push({
+        kind: 'binding',
+        prop,
+        target: tokens[i + 1].split('.'),
+        pos: { line: n.raw.line, col: n.raw.indent + 1 },
+      })
+      consumedUpTo = i + 1
+      i += 1
     }
   }
   for (const c of n.children) {
@@ -437,6 +523,9 @@ function parseElement(n: OutlineNode): ElementNode {
         target: t[2].split('.'),
         pos: { line: c.raw.line, col: c.raw.indent + 1 },
       })
+    } else if (t[1] === ':' && t[0] && t.length >= 3) {
+      // `prop: value` — a static attribute literal on the element.
+      el.attrs[t[0]] = literalFromToken(t.slice(2).join(' '))
     } else {
       throw new Error(`In element <${name}>: unexpected "${c.raw.text}"`)
     }
@@ -451,9 +540,88 @@ function parseAction(n: OutlineNode): ActionNode | null {
     return { kind: 'action', op: 'toggle', target: t[1].split('.'), pos }
   }
   if (t[0] === 'set' && t[1] && t[2] === '=' && t[3]) {
-    return { kind: 'action', op: 'set', target: t[1].split('.'), pos }
+    return {
+      kind: 'action',
+      op: 'set',
+      target: t[1].split('.'),
+      value: parseValueExpr(t.slice(3)),
+      pos,
+    }
+  }
+  if (t[0] === 'clear' && t[1]) {
+    return { kind: 'action', op: 'clear', target: t[1].split('.'), pos }
+  }
+  if (t[0] === 'add' && t[1] === 'to' && t[2]) {
+    const fields: { name: string; value: ValueExpr }[] = []
+    for (const c of n.children) {
+      const ct = c.tokens
+      const colonIdx = ct.indexOf(':')
+      if (colonIdx <= 0) continue
+      const name = ct.slice(0, colonIdx).join('')
+      fields.push({ name, value: parseValueExpr(ct.slice(colonIdx + 1)) })
+    }
+    return { kind: 'action', op: 'add', target: t[2].split('.'), fields, pos }
   }
   return null
+}
+
+// match <inputPath> in <collectionPath> by <field>
+// path / literal / quoted string / number / null
+function parseValueExpr(toks: string[]): ValueExpr {
+  if (
+    toks[0] === 'match' &&
+    toks[1] &&
+    toks[2] === 'in' &&
+    toks[3] &&
+    toks[4] === 'by' &&
+    toks[5]
+  ) {
+    return {
+      kind: 'match',
+      input: toks[1].split('.'),
+      collection: toks[3].split('.'),
+      field: toks[5],
+    }
+  }
+  if (toks.length === 1) {
+    const tok = toks[0]
+    if (tok === 'null') return { kind: 'literal', value: { kind: 'null' } }
+    if (tok === 'true' || tok === 'false') {
+      return { kind: 'literal', value: { kind: 'bool', value: tok === 'true' } }
+    }
+    if (tok.startsWith('"') && tok.endsWith('"')) {
+      return { kind: 'literal', value: { kind: 'string', value: tok.slice(1, -1) } }
+    }
+    if (HEX_RE.test(tok)) return { kind: 'literal', value: { kind: 'color', value: tok } }
+    if (NUM_RE.test(tok)) {
+      return { kind: 'literal', value: { kind: 'number', value: parseFloat(tok) } }
+    }
+    if (IDENT_RE.test(tok) || QUALIFIED_RE.test(tok)) {
+      return { kind: 'path', segments: tok.split('.') }
+    }
+    return { kind: 'literal', value: { kind: 'raw', value: tok } }
+  }
+  return { kind: 'literal', value: literalFromToken(toks.join(' ')) }
+}
+
+function parseQuery(n: OutlineNode, rest: string[], pos: Pos): QueryDecl {
+  const name = expectIdent(rest[0], 'query name', pos)
+  if (rest[1] !== '=') throw new Error(`query ${name}: expected "="`)
+  const sourceTok = rest[2]
+  if (!sourceTok) throw new Error(`query ${name}: expected source collection`)
+  const source = sourceTok.split('.')
+  const filters: QueryDecl['filters'] = []
+  for (const c of n.children) {
+    const t = c.tokens
+    if (t[0] === 'where' && t[1] && t[2] === 'is' && t[3]) {
+      filters.push({
+        field: t[1],
+        value: parseValueExpr(t.slice(3)),
+        pos: { line: c.raw.line, col: c.raw.indent + 1 },
+      })
+    }
+  }
+  return { kind: 'query', name, source, filters, pos }
 }
 
 function parseToken(rest: string[], pos: Pos): TokenDecl {

@@ -279,6 +279,89 @@ app.get('/api/models/ollama', async () => {
   return { models }
 })
 
+// EctoScript cognitive abilities — `match`.
+//
+// Given an `input` string and a list of `candidates`, ask Claude which
+// candidate best matches the input. The chosen candidate's `id` is
+// returned alongside a confidence score and a short reason.
+//
+// Hard-fails (500) if ANTHROPIC_API_KEY is not set — the caller is
+// expected to surface the error in the runtime.
+app.post<{
+  Body: {
+    input?: string
+    candidates?: Array<{ id: string; [k: string]: unknown }>
+    field?: string
+  }
+}>('/api/cognition/match', async (req, reply) => {
+  const { input, candidates, field } = req.body ?? {}
+  if (typeof input !== 'string' || !Array.isArray(candidates)) {
+    return reply.code(400).send({
+      error: 'bad_request',
+      message: 'expected { input: string, candidates: Array<{ id, ...fields }>, field?: string }',
+    })
+  }
+  if (candidates.length === 0) {
+    return { id: null, confidence: 0, reason: 'no candidates' }
+  }
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return reply.code(500).send({
+      error: 'ai_call_failed',
+      message: 'ANTHROPIC_API_KEY is not set. Add it to .env.local at the repo root.',
+    })
+  }
+  const labelField = field ?? 'name'
+  const rendered = candidates
+    .map((c, i) => {
+      const label = String((c as any)[labelField] ?? c.id)
+      return `  ${i}. id=${JSON.stringify(c.id)} ${labelField}=${JSON.stringify(label)}`
+    })
+    .join('\n')
+  const system =
+    'You classify a free-form input against a fixed list of candidates. ' +
+    'Respond with raw JSON only — no prose, no code fences — matching exactly: ' +
+    '{"index": <integer index of the best candidate>, "confidence": <number between 0 and 1>, "reason": <short string>}.'
+  const userMessage =
+    `Input:\n${JSON.stringify(input)}\n\n` +
+    `Candidates (choose the index of the best fit):\n${rendered}\n\n` +
+    `Return JSON only.`
+  try {
+    const client = new Anthropic()
+    const resp = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 256,
+      system,
+      messages: [{ role: 'user', content: userMessage }],
+    })
+    let raw = ''
+    for (const block of resp.content) if (block.type === 'text') raw += block.text
+    const trimmed = raw.trim().replace(/^```(?:json)?\s*|```$/g, '').trim()
+    const parsed = JSON.parse(trimmed) as {
+      index: number
+      confidence?: number
+      reason?: string
+    }
+    const idx = Math.max(0, Math.min(candidates.length - 1, parsed.index))
+    return {
+      id: candidates[idx].id,
+      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 1,
+      reason: parsed.reason ?? '',
+    }
+  } catch (err) {
+    app.log.error({ err }, 'cognition match failed')
+    if (err instanceof Anthropic.APIError) {
+      return reply.code(err.status ?? 500).send({
+        error: 'ai_call_failed',
+        message: err.message,
+      })
+    }
+    return reply.code(500).send({
+      error: 'ai_call_failed',
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
 // AI semantic layer enhancement. Takes existing semantic nodes and the
 // mechanical graph, uses Claude to produce better labels/descriptions.
 app.post<{ Body: { projectId?: string; semanticNodes?: any[] } }>(

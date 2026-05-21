@@ -6,10 +6,11 @@ import { readAtomByPath } from '../lib/ectoscript/tokens'
 interface Props {
   compiled: CompileResult
   atoms: AtomValues
-  setAtom: (id: string, v: any) => void
+  setAtom: (id: string, v: any | ((cur: any) => any)) => void
   resetAtoms: () => void
   selectedElementId: string | null
   onSelectElement: (id: string | null) => void
+  onCognitionError?: (message: string) => void
 }
 
 export function RuntimePreview({
@@ -19,6 +20,7 @@ export function RuntimePreview({
   resetAtoms,
   selectedElementId,
   onSelectElement,
+  onCognitionError,
 }: Props) {
   const [showState, setShowState] = React.useState(false)
   const darkAtomId = compiled.models['Theme']?.atomIds['darkMode']
@@ -81,6 +83,7 @@ export function RuntimePreview({
             setAtom={setAtom}
             selectedElementId={selectedElementId}
             onSelectElement={onSelectElement}
+            onCognitionError={onCognitionError}
           />
         </div>
       </div>

@@ -38,8 +38,10 @@ export function resolveStyleByName(name: string, ctx: ResolveContext): React.CSS
     const key = CSS_KEY_MAP[p.name] ?? p.name
     out[key] = p.value.map((v) => literalToCss(v, ctx)).join(' ')
   }
-  // Sane defaults for cards
-  if (out['background'] && !out['display']) out['display'] = 'flex'
+  // EctoScript styles describe flex containers by default — without
+  // this, `flexDirection: row` and `flex: 1` would have no effect on
+  // styles that don't also set a background.
+  if (!out['display']) out['display'] = 'flex'
   if (!out['flexDirection']) out['flexDirection'] = 'column'
   return out as React.CSSProperties
 }
@@ -70,6 +72,10 @@ export function literalToCss(v: Literal, ctx: ResolveContext): string {
     }
     case 'raw':
       return v.value
+    case 'list':
+      return ''
+    case 'null':
+      return ''
   }
 }
 

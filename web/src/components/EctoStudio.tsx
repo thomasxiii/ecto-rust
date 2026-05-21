@@ -36,17 +36,28 @@ export function EctoStudio({ onBack }: Props) {
     lastCompiledRef.current = compiled
   }, [compiled])
 
-  const setAtom = React.useCallback((id: string, v: any) => {
-    setAtoms((p) => ({ ...p, [id]: v }))
-  }, [])
+  const setAtom = React.useCallback(
+    (id: string, v: any | ((cur: any) => any)) => {
+      setAtoms((p) => {
+        const next = typeof v === 'function' ? (v as (cur: any) => any)(p[id]) : v
+        return { ...p, [id]: next }
+      })
+    },
+    [],
+  )
   const resetAtoms = React.useCallback(() => {
     setAtoms(initAtoms(compiled))
   }, [compiled])
 
   const [selectedElementId, setSelectedElementId] = React.useState<string | null>(null)
   const [tab, setTab] = React.useState<BottomTab>('graph')
+  const [cognitionError, setCognitionError] = React.useState<string | null>(null)
 
-  const errors = [...parsed.errors, ...compiled.errors.map((e) => ({ message: e.message, line: e.line ?? 1, col: e.col ?? 1 }))]
+  const errors = [
+    ...parsed.errors,
+    ...compiled.errors.map((e) => ({ message: e.message, line: e.line ?? 1, col: e.col ?? 1 })),
+    ...(cognitionError ? [{ message: cognitionError, line: 1, col: 1 }] : []),
+  ]
 
   return (
     <div
@@ -129,9 +140,13 @@ export function EctoStudio({ onBack }: Props) {
           compiled={compiled}
           atoms={atoms}
           setAtom={setAtom}
-          resetAtoms={resetAtoms}
+          resetAtoms={() => {
+            resetAtoms()
+            setCognitionError(null)
+          }}
           selectedElementId={selectedElementId}
           onSelectElement={setSelectedElementId}
+          onCognitionError={(msg) => setCognitionError(msg)}
         />
       </section>
 
