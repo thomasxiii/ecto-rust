@@ -40,6 +40,9 @@ pub enum NodeKind {
     /// `template` in this position." Used for list rendering (todos,
     /// search results, etc).
     Repeat,
+    /// Carries a visibility rule. Attached to an Element via a
+    /// `ShownWhen` edge: the element only renders when the rule passes.
+    Visibility,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,6 +68,10 @@ pub enum EdgeKind {
     HasDoc,
     /// Component → Ui (editor metadata, design mode only).
     HasUi,
+    /// Element → Visibility. When the visibility node's rule fails, the
+    /// element is skipped at render time. An element may carry multiple
+    /// `ShownWhen` edges; all rules must pass for the element to render.
+    ShownWhen,
 }
 
 impl NodeKind {
@@ -141,13 +148,27 @@ pub enum NodeData {
     Ui {
         meta: BTreeMap<String, Value>,
     },
-    /// Instructs the renderer: for each item in `source` (an Atom holding
-    /// a `Value::List`), render a copy of `template` (an Element) inline.
-    /// Repeat nodes are *children* of an Element via Contains edges and
-    /// are expanded at render time — they don't appear in the render tree.
+    /// Instructs the renderer: for each item in `source` (an Atom or
+    /// Derived holding a `Value::List`), render a copy of `template`
+    /// (an Element or Component) inline. Repeat nodes are *children* of
+    /// an Element via Contains edges and are expanded at render time —
+    /// they don't appear in the render tree.
     Repeat {
         source: NodeId,
         template: NodeId,
+        /// Conjunctive filter predicates applied per item. Empty = no
+        /// filter (raw list). Used to compile `query Name = list where
+        /// field is value` inline into a `for` loop.
+        #[serde(default)]
+        filters: Vec<RepeatFilter>,
+    },
+    /// Visibility rule attached to an Element via a `ShownWhen` edge.
+    /// The runtime evaluates the rule against the current atom state
+    /// (and, for item-field rules, the enclosing loop item) before
+    /// rendering the target element.
+    Visibility {
+        #[serde(flatten)]
+        rule: VisibilityRule,
     },
 }
 
@@ -165,17 +186,71 @@ impl NodeData {
             NodeData::Doc { .. } => NodeKind::Doc,
             NodeData::Ui { .. } => NodeKind::Ui,
             NodeData::Repeat { .. } => NodeKind::Repeat,
+            NodeData::Visibility { .. } => NodeKind::Visibility,
         }
     }
 }
 
-/// A style property value can be a literal or a reference to a Token / Derived
-/// node. References are resolved during style materialization.
+/// Visibility rule for an Element. Encoded on a `Visibility` node and
+/// attached to the target via `ShownWhen`. `ItemField*` variants only
+/// resolve correctly when the target element is rendered inside a
+/// `Repeat` (so the runtime has an item context).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum VisibilityRule {
+    /// `source` (an Atom or Derived) is truthy.
+    Truthy { source: NodeId },
+    /// `source` equals `value` (by `Value` equality).
+    Equals { source: NodeId, value: Value },
+    /// The current loop item's `key` field is truthy.
+    ItemFieldTruthy { key: String },
+    /// The current loop item's `key` field equals `value`.
+    ItemFieldEquals { key: String, value: Value },
+}
+
+/// Inline filter on a `Repeat`. The runtime evaluates `candidate[field]`
+/// against `compare` for every item; the item is rendered only when the
+/// comparison holds. Multiple filters AND together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatFilter {
+    pub field: String,
+    pub compare: FilterCompare,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FilterCompare {
+    /// Compare to a constant literal.
+    Literal { value: Value },
+    /// Compare to an atom's current value.
+    Atom { source: NodeId },
+    /// Compare to the enclosing loop item's `key` field. Only meaningful
+    /// when the Repeat itself is nested inside another Repeat.
+    OuterItemField { key: String },
+}
+
+/// A style property value can be a literal, a reference to a Token /
+/// Derived node, a multi-part list joined with spaces (CSS shorthand
+/// like `padding: 8px 12px` or `border: 1px solid Slate`), or an alpha
+/// modifier on a color token (`Black.20` → `rgba(17,17,17,0.20)`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StyleValue {
     Literal { value: Value },
     Ref { id: NodeId },
+    Multi { parts: Vec<StylePart> },
+    Alpha { token: NodeId, percent: f64 },
+}
+
+/// One element of a multi-part style value. Same shape as the simple
+/// variants of `StyleValue` minus the wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum StylePart {
+    Literal { value: Value },
+    Ref { id: NodeId },
+    Alpha { token: NodeId, percent: f64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

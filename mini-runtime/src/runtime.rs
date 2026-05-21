@@ -30,7 +30,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    EdgeKind, Graph, GraphPayload, NodeData, NodeId, NodeKind, StyleValue, TextSource,
+    EdgeKind, FilterCompare, Graph, GraphPayload, NodeData, NodeId, NodeKind, RepeatFilter,
+    StylePart, StyleValue, TextSource, VisibilityRule,
 };
 use crate::patch::Patch;
 use crate::snapshot::{EventBinding, RenderNode, RuntimeSnapshot, SemanticAnnotation};
@@ -97,6 +98,47 @@ pub enum EffectKind {
     RemoveFromList { index: usize },
     /// List: write an empty list to the WRITES target.
     ClearList,
+    /// Inspect the WRITES target's current value and write a
+    /// type-appropriate empty: `[]` for a list, `""` for a string, `0`
+    /// for a number, `false` for a bool, `null` otherwise.
+    Clear,
+    /// Read the first READS target's current value and write it to the
+    /// WRITES target. Used for `set X = Y` where Y is a path.
+    SetFromRead,
+    /// List: append a record built from named fields. Each field can be
+    /// a constant literal, the value of an atom read at dispatch, the
+    /// event payload, or an async `match` placeholder (which writes
+    /// `null` for the field and emits a `MatchPending` patch).
+    AppendRecord { fields: Vec<RecordField> },
+    /// Map over the WRITES target list; for the record whose `id`
+    /// matches the dispatch `item_id`, flip the boolean `field`. No-op
+    /// when item_id is missing or no matching record exists.
+    ToggleListItemField { field: String },
+    /// Same shape as ToggleListItemField but writes the dispatch
+    /// payload as the new field value.
+    SetListItemFieldFromInput { field: String },
+}
+
+/// One field of a record produced by `EffectKind::AppendRecord`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RecordField {
+    /// Constant value baked in at compile time.
+    Literal { name: String, value: Value },
+    /// Read the current value of an atom (e.g. a form-state field).
+    Atom { name: String, source: NodeId },
+    /// Read from the event payload (e.g. an input's submit value).
+    Payload { name: String },
+    /// Async LLM `match` — `input` (an atom holding the search text)
+    /// is sent against the items of `candidates` (an atom holding a
+    /// list) and resolved to the picked record's id. The field is
+    /// initialized to `null` and patched later via `resolve_match`.
+    Match {
+        name: String,
+        input: NodeId,
+        candidates: NodeId,
+        by: String,
+    },
 }
 
 /// Root component id used when materializing the render tree. Convention:
@@ -239,16 +281,24 @@ impl Runtime {
 
     /// Dispatch a payload-less event (`click`, `submit`, `focus`).
     pub fn handle_event(&mut self, element: &str, event: &str) -> Vec<Patch> {
-        self.dispatch_event(element, event, None)
+        self.dispatch_event(element, event, None, None, None)
     }
 
     /// Dispatch an event that carries a payload — typically `change` from
     /// an input, whose payload is the new value as a `Value::String`.
+    ///
+    /// `item_id` is supplied by the host when the event fires inside a
+    /// `Repeat` expansion: it identifies which record in the iterated
+    /// list. `item_atom` is the atom id of that list — the runtime
+    /// uses it as the target for list-item effects, so the compiler
+    /// doesn't have to know the iteration source at compile time.
     pub fn dispatch_event(
         &mut self,
         element: &str,
         event: &str,
         payload: Option<Value>,
+        item_id: Option<&str>,
+        item_atom: Option<&str>,
     ) -> Vec<Patch> {
         let mut patches: Vec<Patch> = Vec::new();
 
@@ -278,12 +328,53 @@ impl Runtime {
                     cause: cause_id.clone(),
                     effect: effect_id.clone(),
                 });
-                let written = self.run_effect(&effect_id, payload.as_ref(), &mut patches);
+                let written = self.run_effect(
+                    &effect_id,
+                    payload.as_ref(),
+                    item_id,
+                    item_atom,
+                    &mut patches,
+                );
                 dirty_atoms.extend(written);
             }
         }
 
         self.propagate(dirty_atoms, &mut patches);
+        patches
+    }
+
+    /// Resolve a previously-issued `MatchPending` patch. The host calls
+    /// this once it has the LLM result; the runtime patches the field of
+    /// the named record in `atom_id`'s list and runs propagation.
+    pub fn resolve_match(
+        &mut self,
+        atom_id: &str,
+        record_id: &str,
+        field: &str,
+        value: Value,
+    ) -> Vec<Patch> {
+        let mut patches = Vec::new();
+        let old = match self.graph.node(atom_id).map(|n| &n.data) {
+            Some(NodeData::Atom { value }) => value.clone(),
+            _ => return patches,
+        };
+        let new = patch_list_item(&old, record_id, field, value);
+        if new == old {
+            return patches;
+        }
+        if let Some(node) = self.graph.node_mut(atom_id) {
+            if let NodeData::Atom { value } = &mut node.data {
+                *value = new.clone();
+            }
+        }
+        patches.push(Patch::AtomChanged {
+            node: atom_id.to_string(),
+            old,
+            new,
+        });
+        let mut dirty: HashSet<NodeId> = HashSet::new();
+        dirty.insert(atom_id.to_string());
+        self.propagate(dirty, &mut patches);
         patches
     }
 
@@ -295,6 +386,8 @@ impl Runtime {
         &mut self,
         effect_id: &str,
         payload: Option<&Value>,
+        item_id: Option<&str>,
+        item_atom: Option<&str>,
         patches: &mut Vec<Patch>,
     ) -> HashSet<NodeId> {
         let mut written = HashSet::new();
@@ -304,23 +397,73 @@ impl Runtime {
             _ => return written,
         };
 
-        // For effects that READ from another atom (AppendReadToList), look
-        // up the first Reads target's current value. This lets a click
-        // effect on "Add" pull the current Draft atom and push it onto
-        // Tasks without needing the event to carry a payload.
+        // For effects that READ from another atom (AppendReadToList,
+        // SetFromRead), look up the first Reads target's current value.
+        // This lets a click effect on "Add" pull the current Draft atom
+        // and push it onto Tasks without needing the event to carry a
+        // payload.
         let read_value: Option<Value> = self
             .graph
             .outgoing_targets(effect_id, EdgeKind::Reads)
             .first()
             .and_then(|id| self.lookup_value(id));
 
-        let writes: Vec<NodeId> = self.graph.outgoing_targets(effect_id, EdgeKind::Writes);
+        // List-item effects target the enclosing Repeat's source atom,
+        // discovered at dispatch via `item_atom`. The compiler may have
+        // wired an explicit Writes edge too; if not, the dispatch
+        // context is the only source of truth.
+        let writes: Vec<NodeId> = if matches!(
+            kind,
+            EffectKind::ToggleListItemField { .. }
+                | EffectKind::SetListItemFieldFromInput { .. }
+        ) {
+            if let Some(a) = item_atom {
+                vec![a.to_string()]
+            } else {
+                self.graph.outgoing_targets(effect_id, EdgeKind::Writes)
+            }
+        } else {
+            self.graph.outgoing_targets(effect_id, EdgeKind::Writes)
+        };
+
+        // AppendRecord builds a record by reading multiple named atoms
+        // and possibly emitting MatchPending patches. It's handled
+        // separately because apply_effect's single-value contract
+        // doesn't fit: the record id needs to be known *before* we
+        // push, so MatchPending patches can reference it.
+        if let EffectKind::AppendRecord { fields } = &kind {
+            for atom_id in &writes {
+                let old = match self.graph.node(atom_id).map(|n| &n.data) {
+                    Some(NodeData::Atom { value }) => value.clone(),
+                    _ => continue,
+                };
+                let (new, pending) = self.build_append_record(atom_id, &old, fields, payload);
+                if new != old {
+                    if let Some(node) = self.graph.node_mut(atom_id) {
+                        if let NodeData::Atom { value } = &mut node.data {
+                            *value = new.clone();
+                        }
+                    }
+                    patches.push(Patch::AtomChanged {
+                        node: atom_id.clone(),
+                        old,
+                        new,
+                    });
+                    written.insert(atom_id.clone());
+                }
+                for p in pending {
+                    patches.push(p);
+                }
+            }
+            return written;
+        }
+
         for atom_id in writes {
             let old = match self.graph.node(&atom_id).map(|n| &n.data) {
                 Some(NodeData::Atom { value }) => value.clone(),
                 _ => continue,
             };
-            let new = apply_effect(&kind, &old, payload, read_value.as_ref());
+            let new = apply_effect(&kind, &old, payload, read_value.as_ref(), item_id);
             if new != old {
                 if let Some(node) = self.graph.node_mut(&atom_id) {
                     if let NodeData::Atom { value } = &mut node.data {
@@ -337,6 +480,73 @@ impl Runtime {
         }
 
         written
+    }
+
+    /// Compute the new list value for an `AppendRecord` effect, plus
+    /// any `MatchPending` patches the record requires the host to
+    /// resolve asynchronously. Generates a fresh `r_<base36>` record id
+    /// so the host has a stable handle for `resolve_match`.
+    fn build_append_record(
+        &self,
+        atom_id: &str,
+        old: &Value,
+        fields: &[RecordField],
+        payload: Option<&Value>,
+    ) -> (Value, Vec<Patch>) {
+        let record_id = generate_record_id();
+        let mut record: BTreeMap<String, Value> = BTreeMap::new();
+        record.insert("id".to_string(), Value::String(record_id.clone()));
+        let mut pending: Vec<Patch> = Vec::new();
+        for f in fields {
+            match f {
+                RecordField::Literal { name, value } => {
+                    record.insert(name.clone(), value.clone());
+                }
+                RecordField::Atom { name, source } => {
+                    let v = self.lookup_value(source).unwrap_or(Value::Null);
+                    record.insert(name.clone(), v);
+                }
+                RecordField::Payload { name } => {
+                    let v = payload.cloned().unwrap_or(Value::Null);
+                    record.insert(name.clone(), v);
+                }
+                RecordField::Match {
+                    name,
+                    input,
+                    candidates,
+                    by,
+                } => {
+                    record.insert(name.clone(), Value::Null);
+                    let input_val = self
+                        .lookup_value(input)
+                        .and_then(|v| match v {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let candidate_items = match self.lookup_value(candidates) {
+                        Some(Value::List(items)) => items,
+                        _ => Vec::new(),
+                    };
+                    // Only ask the host to resolve if there's a non-empty
+                    // input AND at least one candidate — otherwise null
+                    // is the right answer with no work to do.
+                    if !input_val.is_empty() && !candidate_items.is_empty() {
+                        pending.push(Patch::MatchPending {
+                            atom: atom_id.to_string(),
+                            record_id: record_id.clone(),
+                            field: name.clone(),
+                            input: input_val,
+                            candidates: candidate_items,
+                            by: by.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        let mut items = list_or_empty(old);
+        items.push(Value::Object(record));
+        (Value::List(items), pending)
     }
 
     // ---------------------------------------------------------------------
@@ -525,15 +735,50 @@ impl Runtime {
         for (element_id, props) in rules {
             let mut resolved: BTreeMap<String, Value> = BTreeMap::new();
             for (prop, sv) in props {
-                let value = match sv {
-                    StyleValue::Literal { value } => value,
-                    StyleValue::Ref { id } => self.lookup_value(&id).unwrap_or(Value::Null),
-                };
+                let value = self.resolve_style_value(&sv);
                 resolved.insert(prop, value);
             }
             out.insert(element_id, resolved);
         }
         out
+    }
+
+    fn resolve_style_value(&self, sv: &StyleValue) -> Value {
+        match sv {
+            StyleValue::Literal { value } => value.clone(),
+            StyleValue::Ref { id } => self.lookup_value(id).unwrap_or(Value::Null),
+            StyleValue::Alpha { token, percent } => Value::String(self.resolve_alpha(token, *percent)),
+            StyleValue::Multi { parts } => {
+                let pieces: Vec<String> = parts
+                    .iter()
+                    .map(|p| match p {
+                        StylePart::Literal { value } => value.plain_text(),
+                        StylePart::Ref { id } => {
+                            self.lookup_value(id).unwrap_or(Value::Null).plain_text()
+                        }
+                        StylePart::Alpha { token, percent } => self.resolve_alpha(token, *percent),
+                    })
+                    .collect();
+                Value::String(pieces.join(" "))
+            }
+        }
+    }
+
+    /// Render `TokenColor.percent` as `rgba(r, g, b, percent/100)`. The
+    /// token's value should be a hex color (`#rgb` / `#rrggbb`). If the
+    /// token isn't a recognizable color, falls back to the token's
+    /// plain text.
+    fn resolve_alpha(&self, token: &str, percent: f64) -> String {
+        let raw = match self.lookup_value(token) {
+            Some(v) => v.plain_text(),
+            None => return String::new(),
+        };
+        let alpha = (percent / 100.0).clamp(0.0, 1.0);
+        if let Some((r, g, b)) = parse_hex_color(&raw) {
+            format!("rgba({r}, {g}, {b}, {alpha:.2})")
+        } else {
+            raw
+        }
     }
 
     fn lookup_value(&self, node_id: &str) -> Option<Value> {
@@ -585,7 +830,7 @@ impl Runtime {
         // once per item — those visits clear the template id between
         // iterations).
         let mut visited: HashSet<NodeId> = HashSet::new();
-        self.build_render_node(root_id, design_mode, &mut visited, None)
+        self.build_render_node(root_id, design_mode, &mut visited, None, None)
             .unwrap_or_else(|| RenderNode {
                 id: root_id.to_string(),
                 name: root_id.to_string(),
@@ -595,6 +840,8 @@ impl Runtime {
                 attrs: BTreeMap::new(),
                 children: vec![],
                 semantic: None,
+                item_id: None,
+                item_atom: None,
             })
     }
 
@@ -607,34 +854,55 @@ impl Runtime {
         design_mode: bool,
         visited: &mut HashSet<NodeId>,
         item: Option<&Value>,
+        outer_list: Option<&str>,
     ) -> Vec<RenderNode> {
         let mut children = Vec::new();
         for e in self.graph.outgoing(parent_id, edge_kind) {
             let target = self.graph.node(&e.to);
             match target.map(|n| &n.data) {
-                Some(NodeData::Repeat { source, template }) => {
-                    let items = self
-                        .atom_value(source)
-                        .and_then(|v| match v {
-                            Value::List(items) => Some(items),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
+                Some(NodeData::Repeat {
+                    source,
+                    template,
+                    filters,
+                }) => {
+                    let raw_items = match self.lookup_value(source) {
+                        Some(Value::List(items)) => items,
+                        _ => Vec::new(),
+                    };
+                    let items: Vec<Value> = if filters.is_empty() {
+                        raw_items
+                    } else {
+                        let filters_clone = filters.clone();
+                        raw_items
+                            .into_iter()
+                            .filter(|it| {
+                                filters_clone
+                                    .iter()
+                                    .all(|f| self.evaluate_filter(f, it, item))
+                            })
+                            .collect()
+                    };
                     for it in &items {
-                        // Each iteration is its own visit-scope so the
-                        // template id can re-enter.
                         let mut iter_visited = visited.clone();
-                        if let Some(rn) =
-                            self.build_render_node(template, design_mode, &mut iter_visited, Some(it))
-                        {
+                        if let Some(rn) = self.build_render_node(
+                            template,
+                            design_mode,
+                            &mut iter_visited,
+                            Some(it),
+                            Some(source.as_str()),
+                        ) {
                             children.push(rn);
                         }
                     }
                 }
                 _ => {
-                    if let Some(rn) =
-                        self.build_render_node(&e.to, design_mode, visited, item)
-                    {
+                    if let Some(rn) = self.build_render_node(
+                        &e.to,
+                        design_mode,
+                        visited,
+                        item,
+                        outer_list,
+                    ) {
                         children.push(rn);
                     }
                 }
@@ -643,12 +911,75 @@ impl Runtime {
         children
     }
 
+    /// Test a `RepeatFilter` against a candidate item, with the
+    /// enclosing loop's item available for `OuterItemField` comparisons.
+    fn evaluate_filter(
+        &self,
+        f: &RepeatFilter,
+        candidate: &Value,
+        outer_item: Option<&Value>,
+    ) -> bool {
+        let lhs = match candidate {
+            Value::Object(m) => m.get(&f.field).cloned().unwrap_or(Value::Null),
+            _ => return false,
+        };
+        let rhs = match &f.compare {
+            FilterCompare::Literal { value } => value.clone(),
+            FilterCompare::Atom { source } => self.lookup_value(source).unwrap_or(Value::Null),
+            FilterCompare::OuterItemField { key } => match outer_item {
+                Some(Value::Object(m)) => m.get(key).cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            },
+        };
+        lhs == rhs
+    }
+
+    /// Evaluate every `ShownWhen` visibility rule attached to `element_id`.
+    /// All must hold; any failure hides the element.
+    fn passes_visibility(&self, element_id: &str, item: Option<&Value>) -> bool {
+        let vis_ids = self
+            .graph
+            .outgoing_targets(element_id, EdgeKind::ShownWhen);
+        for vid in vis_ids {
+            let rule = match self.graph.node(&vid).map(|n| &n.data) {
+                Some(NodeData::Visibility { rule }) => rule.clone(),
+                _ => continue,
+            };
+            if !self.evaluate_visibility(&rule, item) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn evaluate_visibility(&self, rule: &VisibilityRule, item: Option<&Value>) -> bool {
+        match rule {
+            VisibilityRule::Truthy { source } => {
+                let v = self.lookup_value(source).unwrap_or(Value::Null);
+                is_truthy(&v)
+            }
+            VisibilityRule::Equals { source, value } => {
+                let v = self.lookup_value(source).unwrap_or(Value::Null);
+                &v == value
+            }
+            VisibilityRule::ItemFieldTruthy { key } => match item {
+                Some(Value::Object(m)) => is_truthy(m.get(key).unwrap_or(&Value::Null)),
+                _ => false,
+            },
+            VisibilityRule::ItemFieldEquals { key, value } => match item {
+                Some(Value::Object(m)) => m.get(key).map(|v| v == value).unwrap_or(false),
+                _ => false,
+            },
+        }
+    }
+
     fn build_render_node(
         &self,
         id: &str,
         design_mode: bool,
         visited: &mut HashSet<NodeId>,
         item: Option<&Value>,
+        outer_list: Option<&str>,
     ) -> Option<RenderNode> {
         if !visited.insert(id.to_string()) {
             return None;
@@ -656,13 +987,28 @@ impl Runtime {
         let node = self.graph.node(id)?;
         let kind = node.kind();
 
+        if matches!(node.data, NodeData::Element { .. }) && !self.passes_visibility(id, item) {
+            visited.remove(id);
+            return None;
+        }
+
         let children: Vec<RenderNode> = match &node.data {
-            NodeData::Component => {
-                self.build_children(id, EdgeKind::Renders, design_mode, visited, item)
-            }
-            NodeData::Element { .. } => {
-                self.build_children(id, EdgeKind::Contains, design_mode, visited, item)
-            }
+            NodeData::Component => self.build_children(
+                id,
+                EdgeKind::Renders,
+                design_mode,
+                visited,
+                item,
+                outer_list,
+            ),
+            NodeData::Element { .. } => self.build_children(
+                id,
+                EdgeKind::Contains,
+                design_mode,
+                visited,
+                item,
+                outer_list,
+            ),
             _ => vec![],
         };
 
@@ -689,6 +1035,13 @@ impl Runtime {
             None
         };
 
+        let item_id = item.and_then(|v| match v {
+            Value::Object(m) => match m.get("id") {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
         Some(RenderNode {
             id: id.to_string(),
             name: node.name.clone(),
@@ -698,6 +1051,8 @@ impl Runtime {
             attrs,
             children,
             semantic,
+            item_id,
+            item_atom: outer_list.map(|s| s.to_string()),
         })
     }
 
@@ -743,6 +1098,7 @@ fn apply_effect(
     old: &Value,
     payload: Option<&Value>,
     read_value: Option<&Value>,
+    item_id: Option<&str>,
 ) -> Value {
     match kind {
         EffectKind::ToggleThemeMode => match old.as_str() {
@@ -793,7 +1149,160 @@ fn apply_effect(
             Value::List(items)
         }
         EffectKind::ClearList => Value::List(Vec::new()),
+        EffectKind::Clear => empty_for_type(old),
+        EffectKind::SetFromRead => read_value.cloned().unwrap_or(Value::Null),
+        // Handled inline in run_effect (needs graph access).
+        EffectKind::AppendRecord { .. } => old.clone(),
+        EffectKind::ToggleListItemField { field } => {
+            let id = match item_id {
+                Some(s) => s,
+                None => return old.clone(),
+            };
+            toggle_list_item(old, id, field)
+        }
+        EffectKind::SetListItemFieldFromInput { field } => {
+            let id = match item_id {
+                Some(s) => s,
+                None => return old.clone(),
+            };
+            let v = payload.cloned().unwrap_or(Value::Null);
+            patch_list_item(old, id, field, v)
+        }
     }
+}
+
+/// For `Clear`, pick the natural empty value matching the current
+/// shape: `[]`, `""`, `0`, `false`, `null`. Mirrors the TS runtime.
+fn empty_for_type(v: &Value) -> Value {
+    match v {
+        Value::List(_) => Value::List(Vec::new()),
+        Value::String(_) => Value::String(String::new()),
+        Value::Number(_) => Value::Number(0.0),
+        Value::Bool(_) => Value::Bool(false),
+        Value::Object(_) => Value::Object(BTreeMap::new()),
+        Value::Null => Value::Null,
+    }
+}
+
+/// Walk a list, find the record whose `id` equals `record_id`, flip its
+/// `field` (boolean). Returns the original value if no record matches.
+fn toggle_list_item(old: &Value, record_id: &str, field: &str) -> Value {
+    match old {
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            let mut hit = false;
+            for it in items {
+                match it {
+                    Value::Object(m) if matches_record_id(m, record_id) => {
+                        let mut m2 = m.clone();
+                        let cur = m2.get(field).cloned().unwrap_or(Value::Null);
+                        let next = match cur.as_bool() {
+                            Some(b) => Value::Bool(!b),
+                            None => Value::Bool(true),
+                        };
+                        m2.insert(field.to_string(), next);
+                        out.push(Value::Object(m2));
+                        hit = true;
+                    }
+                    _ => out.push(it.clone()),
+                }
+            }
+            if hit {
+                Value::List(out)
+            } else {
+                old.clone()
+            }
+        }
+        _ => old.clone(),
+    }
+}
+
+/// Walk a list, find the record whose `id` equals `record_id`, write
+/// `value` into its `field`. Used by both `SetListItemFieldFromInput`
+/// (events from inside a loop) and `resolve_match` (async match
+/// resolution).
+pub(crate) fn patch_list_item(
+    old: &Value,
+    record_id: &str,
+    field: &str,
+    value: Value,
+) -> Value {
+    match old {
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            let mut hit = false;
+            for it in items {
+                match it {
+                    Value::Object(m) if matches_record_id(m, record_id) => {
+                        let mut m2 = m.clone();
+                        m2.insert(field.to_string(), value.clone());
+                        out.push(Value::Object(m2));
+                        hit = true;
+                    }
+                    _ => out.push(it.clone()),
+                }
+            }
+            if hit {
+                Value::List(out)
+            } else {
+                old.clone()
+            }
+        }
+        _ => old.clone(),
+    }
+}
+
+fn matches_record_id(m: &BTreeMap<String, Value>, record_id: &str) -> bool {
+    matches!(m.get("id"), Some(Value::String(s)) if s == record_id)
+}
+
+/// Lightweight record-id generator. Combines `Runtime::next_record_id`
+/// (a process-local counter; see `prime_caches`) with a base36-encoded
+/// timestamp suffix so concurrent appends in a session never collide.
+fn generate_record_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Base36 of the counter — short, opaque, stable across the session.
+    let mut s = String::from("r_");
+    s.push_str(&to_base36(n));
+    s
+}
+
+/// Parse a `#rgb` or `#rrggbb` (with or without leading `#`) into a
+/// tuple of u8 components. Returns None for any unrecognized shape.
+fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let body = s.strip_prefix('#').unwrap_or(s);
+    let expand = |hex: &str| -> Option<u8> { u8::from_str_radix(hex, 16).ok() };
+    match body.len() {
+        3 => {
+            let r = expand(&body[0..1].repeat(2))?;
+            let g = expand(&body[1..2].repeat(2))?;
+            let b = expand(&body[2..3].repeat(2))?;
+            Some((r, g, b))
+        }
+        6 | 8 => {
+            let r = expand(&body[0..2])?;
+            let g = expand(&body[2..4])?;
+            let b = expand(&body[4..6])?;
+            Some((r, g, b))
+        }
+        _ => None,
+    }
+}
+
+fn to_base36(mut n: u64) -> String {
+    const ALPHA: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut buf = Vec::new();
+    while n > 0 {
+        buf.push(ALPHA[(n % 36) as usize]);
+        n /= 36;
+    }
+    buf.reverse();
+    String::from_utf8(buf).unwrap()
 }
 
 fn list_or_empty(v: &Value) -> Vec<Value> {

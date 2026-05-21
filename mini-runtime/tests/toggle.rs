@@ -418,6 +418,7 @@ fn repeat_node_expands_list_items_into_children() {
         NodeData::Repeat {
             source: "Items".into(),
             template: "item".into(),
+            filters: Vec::new(),
         },
     ));
     g.add_node(Node::new(
@@ -476,6 +477,7 @@ fn repeat_appends_react_to_atom_change() {
         NodeData::Repeat {
             source: "Items".into(),
             template: "item".into(),
+            filters: Vec::new(),
         },
     ));
     g.add_node(Node::new(
@@ -518,8 +520,8 @@ fn repeat_appends_react_to_atom_change() {
     g.add_edge(Edge::new("AppendEff", "Items", EdgeKind::Writes));
 
     let mut rt = Runtime::new(g);
-    rt.dispatch_event("input", "change", Some(Value::string("buy milk")));
-    rt.dispatch_event("input", "change", Some(Value::string("walk dog")));
+    rt.dispatch_event("input", "change", Some(Value::string("buy milk")), None, None);
+    rt.dispatch_event("input", "change", Some(Value::string("walk dog")), None, None);
 
     let snap = rt.materialize(false);
     // Find the list element among the App's rendered children.
@@ -718,7 +720,7 @@ fn input_change_event_writes_to_bound_atom() {
     g.add_edge(Edge::new("WriteName", "Name", EdgeKind::Writes));
 
     let mut rt = Runtime::new(g);
-    let patches = rt.dispatch_event("input", "change", Some(Value::string("Tom")));
+    let patches = rt.dispatch_event("input", "change", Some(Value::string("Tom")), None, None);
     assert!(patches.iter().any(|p| matches!(
         p,
         Patch::AtomChanged { node, new, .. } if node == "Name" && new == &Value::string("Tom")

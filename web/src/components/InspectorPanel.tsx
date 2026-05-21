@@ -1,15 +1,33 @@
 import React from 'react'
-import type { EctoGraph, EctoNode } from '../lib/ectoscript/graph'
-import { NODE_TYPE_COLORS } from '../lib/ectoscript/graph'
+import type { MiniGraphPayload, RuntimeSnapshot, MiniValue } from '../engine'
 
 interface Props {
-  graph: EctoGraph
+  payload: MiniGraphPayload | null
   selectedId: string | null
-  atomValues?: Record<string, any>
+  snapshot: RuntimeSnapshot | null
 }
 
-export function InspectorPanel({ graph, selectedId, atomValues }: Props) {
-  const node = selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null
+interface AnyNode {
+  id: string
+  name: string
+  type?: string
+  [k: string]: unknown
+}
+
+interface AnyEdge {
+  from: string
+  to: string
+  kind: string
+}
+
+export function InspectorPanel({ payload, selectedId, snapshot }: Props) {
+  const node = React.useMemo<AnyNode | null>(() => {
+    if (!payload || !selectedId) return null
+    return (
+      (payload.nodes as AnyNode[]).find((n) => n.id === selectedId) ?? null
+    )
+  }, [payload, selectedId])
+
   if (!node) {
     return (
       <div style={{ padding: 16, color: '#94a3b8', fontSize: 12 }}>
@@ -17,15 +35,22 @@ export function InspectorPanel({ graph, selectedId, atomValues }: Props) {
       </div>
     )
   }
-  const incoming = graph.edges.filter((e) => e.target === node.id)
-  const outgoing = graph.edges.filter((e) => e.source === node.id)
-  const liveValue =
-    node.type === 'Atom' && atomValues && node.id in atomValues
-      ? atomValues[node.id]
-      : undefined
+  const edges = (payload?.edges as AnyEdge[]) ?? []
+  const incoming = edges.filter((e) => e.to === node.id)
+  const outgoing = edges.filter((e) => e.from === node.id)
+  const liveValue: MiniValue | undefined =
+    node.type === 'atom' && snapshot ? snapshot.atoms[node.id] : undefined
 
   return (
-    <div style={{ padding: 16, fontSize: 12, color: '#e2e8f0', overflow: 'auto', height: '100%' }}>
+    <div
+      style={{
+        padding: 16,
+        fontSize: 12,
+        color: '#e2e8f0',
+        overflow: 'auto',
+        height: '100%',
+      }}
+    >
       <div
         style={{
           display: 'inline-flex',
@@ -43,62 +68,69 @@ export function InspectorPanel({ graph, selectedId, atomValues }: Props) {
             width: 8,
             height: 8,
             borderRadius: 8,
-            background: NODE_TYPE_COLORS[node.type] ?? '#94a3b8',
+            background: colorForKind(String(node.type ?? '')),
             display: 'inline-block',
           }}
         />
-        {node.type}
+        {String(node.type ?? 'node')}
       </div>
-      <h3 style={{ margin: '12px 0 4px', fontSize: 15, color: '#f1f5f9' }}>{node.label}</h3>
-      <div style={{ color: '#64748b', fontFamily: 'JetBrains Mono, ui-monospace, monospace', fontSize: 10 }}>
+      <h3 style={{ margin: '12px 0 4px', fontSize: 15, color: '#f1f5f9' }}>
+        {node.name}
+      </h3>
+      <div
+        style={{
+          color: '#64748b',
+          fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+          fontSize: 10,
+        }}
+      >
         {node.id}
       </div>
       {liveValue !== undefined ? (
         <div style={{ marginTop: 12 }}>
           <SectionLabel>Live value</SectionLabel>
-          <pre
-            style={{
-              margin: 0,
-              padding: 8,
-              background: 'rgba(15, 23, 42, 0.5)',
-              borderRadius: 6,
-              fontSize: 11,
-              fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-              color: '#7dd3fc',
-            }}
-          >
-            {JSON.stringify(liveValue)}
-          </pre>
+          <pre style={preStyle}>{JSON.stringify(liveValue, null, 2)}</pre>
         </div>
       ) : null}
-      {node.data ? (
-        <div style={{ marginTop: 12 }}>
-          <SectionLabel>Data</SectionLabel>
-          <pre
-            style={{
-              margin: 0,
-              padding: 8,
-              background: 'rgba(15, 23, 42, 0.5)',
-              borderRadius: 6,
-              fontSize: 11,
-              fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-              color: '#cbd5e1',
-              overflow: 'auto',
-            }}
-          >
-            {JSON.stringify(node.data, null, 2)}
-          </pre>
-        </div>
-      ) : null}
-      <EdgeList title={`Incoming (${incoming.length})`} edges={incoming} other={(e) => e.source} graph={graph} />
-      <EdgeList title={`Outgoing (${outgoing.length})`} edges={outgoing} other={(e) => e.target} graph={graph} />
+      <div style={{ marginTop: 12 }}>
+        <SectionLabel>Data</SectionLabel>
+        <pre style={preStyle}>{JSON.stringify(stripCommon(node), null, 2)}</pre>
+      </div>
+      <EdgeList title={`Incoming (${incoming.length})`} edges={incoming} other={(e) => e.from} payload={payload} />
+      <EdgeList title={`Outgoing (${outgoing.length})`} edges={outgoing} other={(e) => e.to} payload={payload} />
     </div>
   )
 }
 
+const preStyle: React.CSSProperties = {
+  margin: 0,
+  padding: 8,
+  background: 'rgba(15, 23, 42, 0.5)',
+  borderRadius: 6,
+  fontSize: 11,
+  fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+  color: '#cbd5e1',
+  overflow: 'auto',
+}
+
+function stripCommon(n: AnyNode): Record<string, unknown> {
+  const { id, name, ...rest } = n
+  void id
+  void name
+  return rest
+}
+
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+    <div
+      style={{
+        fontSize: 10,
+        opacity: 0.6,
+        textTransform: 'uppercase',
+        letterSpacing: 0.4,
+        marginBottom: 4,
+      }}
+    >
       {children}
     </div>
   )
@@ -108,24 +140,35 @@ function EdgeList({
   title,
   edges,
   other,
-  graph,
+  payload,
 }: {
   title: string
-  edges: { id: string; source: string; target: string; type: string }[]
-  other: (e: any) => string
-  graph: EctoGraph
+  edges: AnyEdge[]
+  other: (e: AnyEdge) => string
+  payload: MiniGraphPayload | null
 }) {
   if (edges.length === 0) return null
   return (
     <div style={{ marginTop: 12 }}>
       <SectionLabel>{title}</SectionLabel>
-      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {edges.map((e) => {
+      <ul
+        style={{
+          listStyle: 'none',
+          margin: 0,
+          padding: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+        }}
+      >
+        {edges.map((e, i) => {
           const otherId = other(e)
-          const otherNode = graph.nodes.find((n: EctoNode) => n.id === otherId)
+          const otherNode = (payload?.nodes as AnyNode[] | undefined)?.find(
+            (n) => n.id === otherId,
+          )
           return (
             <li
-              key={e.id}
+              key={`${e.kind}-${e.from}-${e.to}-${i}`}
               style={{
                 padding: '4px 8px',
                 background: 'rgba(15, 23, 42, 0.4)',
@@ -133,13 +176,42 @@ function EdgeList({
                 fontSize: 11,
               }}
             >
-              <span style={{ color: '#7dd3fc' }}>{e.type}</span>{' '}
-              <span style={{ color: '#cbd5e1' }}>{otherNode?.label ?? otherId}</span>
-              <span style={{ color: '#64748b' }}> · {otherNode?.type ?? ''}</span>
+              <span style={{ color: '#7dd3fc' }}>{e.kind}</span>{' '}
+              <span style={{ color: '#cbd5e1' }}>
+                {otherNode?.name ?? otherId}
+              </span>
+              <span style={{ color: '#64748b' }}> · {String(otherNode?.type ?? '')}</span>
             </li>
           )
         })}
       </ul>
     </div>
   )
+}
+
+function colorForKind(kind: string): string {
+  switch (kind) {
+    case 'component':
+      return '#34d399'
+    case 'element':
+      return '#60a5fa'
+    case 'atom':
+      return '#facc15'
+    case 'token':
+      return '#fb923c'
+    case 'derived':
+      return '#a78bfa'
+    case 'styleSheet':
+      return '#f472b6'
+    case 'cause':
+      return '#22d3ee'
+    case 'effect':
+      return '#f87171'
+    case 'repeat':
+      return '#fb7185'
+    case 'visibility':
+      return '#c084fc'
+    default:
+      return '#94a3b8'
+  }
 }

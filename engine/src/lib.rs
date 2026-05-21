@@ -8,6 +8,7 @@
 //! Public surface lives in [`Engine`]; internal modules under `graph`,
 //! `mutations`, `importer`, `semantic`, `ui`, `render`.
 
+pub mod ectoscript;
 pub mod graph;
 pub mod importer;
 pub mod mutations;

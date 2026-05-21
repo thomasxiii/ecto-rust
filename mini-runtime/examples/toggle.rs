@@ -117,6 +117,17 @@ fn print_patches(patches: &[Patch]) {
                     new.display()
                 );
             }
+            Patch::MatchPending {
+                atom,
+                record_id,
+                field,
+                input,
+                ..
+            } => {
+                println!(
+                    "  MatchPending   {atom}[{record_id}].{field} ← match({input:?})"
+                );
+            }
         }
     }
 }

@@ -36,7 +36,8 @@ fn write_nodes(rt: &Runtime, out: &mut String) {
     out.push_str("// ── nodes ────────────────────────────────────────────────────\n");
     use NodeKind::*;
     let order = [
-        Component, Element, Repeat, Atom, Token, Derived, StyleSheet, Cause, Effect, Doc, Ui,
+        Component, Element, Repeat, Visibility, Atom, Token, Derived, StyleSheet, Cause, Effect,
+        Doc, Ui,
     ];
     for kind in &order {
         let mut nodes: Vec<&Node> = rt.graph.nodes().filter(|n| n.kind() == *kind).collect();
@@ -147,10 +148,48 @@ fn format_node(rt: &Runtime, n: &Node) -> String {
                 vec![("name", quote(&n.name)), ("meta", format!("{{{}}}", entries.join(", ")))]
             }
         }
-        NodeData::Repeat { source, template } => vec![
-            ("source", source.clone()),
-            ("template", template.clone()),
-        ],
+        NodeData::Repeat {
+            source,
+            template,
+            filters,
+        } => {
+            let mut v = vec![
+                ("source", source.clone()),
+                ("template", template.clone()),
+            ];
+            if !filters.is_empty() {
+                let parts: Vec<String> = filters
+                    .iter()
+                    .map(|f| match &f.compare {
+                        crate::graph::FilterCompare::Literal { value } => {
+                            format!("{} == {}", f.field, value.display())
+                        }
+                        crate::graph::FilterCompare::Atom { source } => {
+                            format!("{} == &{}", f.field, source)
+                        }
+                        crate::graph::FilterCompare::OuterItemField { key } => {
+                            format!("{} == <outer.{}>", f.field, key)
+                        }
+                    })
+                    .collect();
+                v.push(("filters", format!("[{}]", parts.join(", "))));
+            }
+            v
+        }
+        NodeData::Visibility { rule } => match rule {
+            crate::graph::VisibilityRule::Truthy { source } => {
+                vec![("rule", format!("truthy({source})"))]
+            }
+            crate::graph::VisibilityRule::Equals { source, value } => {
+                vec![("rule", format!("{source} == {}", value.display()))]
+            }
+            crate::graph::VisibilityRule::ItemFieldTruthy { key } => {
+                vec![("rule", format!("item.{key} truthy"))]
+            }
+            crate::graph::VisibilityRule::ItemFieldEquals { key, value } => {
+                vec![("rule", format!("item.{key} == {}", value.display()))]
+            }
+        },
     };
 
     let prop_str = if props.is_empty() {
@@ -178,6 +217,7 @@ fn label_for(kind: NodeKind) -> &'static str {
         NodeKind::Doc => "Doc",
         NodeKind::Ui => "Ui",
         NodeKind::Repeat => "Repeat",
+        NodeKind::Visibility => "Visibility",
     }
 }
 
@@ -194,6 +234,7 @@ fn edge_kind_name(k: crate::graph::EdgeKind) -> &'static str {
         Targets => "TARGETS",
         HasDoc => "HAS_DOC",
         HasUi => "HAS_UI",
+        ShownWhen => "SHOWN_WHEN",
     }
 }
 
@@ -231,6 +272,15 @@ fn effect_kind_label(k: &EffectKind) -> String {
         EffectKind::AppendReadToList => "AppendReadToList".into(),
         EffectKind::RemoveFromList { index } => format!("RemoveFromList({index})"),
         EffectKind::ClearList => "ClearList".into(),
+        EffectKind::Clear => "Clear".into(),
+        EffectKind::SetFromRead => "SetFromRead".into(),
+        EffectKind::AppendRecord { fields } => format!("AppendRecord({} fields)", fields.len()),
+        EffectKind::ToggleListItemField { field } => {
+            format!("ToggleListItemField({field})")
+        }
+        EffectKind::SetListItemFieldFromInput { field } => {
+            format!("SetListItemFieldFromInput({field})")
+        }
     }
 }
 

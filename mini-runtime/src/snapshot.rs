@@ -35,6 +35,20 @@ pub struct RenderNode {
     pub children: Vec<RenderNode>,
     /// Doc/Ui pointers attached when materialized in design mode.
     pub semantic: Option<SemanticAnnotation>,
+    /// When this node was materialized inside a `Repeat` expansion,
+    /// the value of the iterated item's `id` field. Hosts pass this
+    /// back to `dispatch_event` so list-item effects know which record
+    /// to mutate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// The atom id of the list being iterated by the immediately
+    /// enclosing `Repeat`. Hosts pair this with `item_id` when
+    /// dispatching list-item effects (`ToggleListItemField`,
+    /// `SetListItemFieldFromInput`) — the runtime uses it as the
+    /// mutation target so the compiler doesn't need to know the
+    /// caller's loop source at compile time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_atom: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]

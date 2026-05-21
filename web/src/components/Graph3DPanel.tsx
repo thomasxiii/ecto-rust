@@ -1,13 +1,27 @@
 import React from 'react'
 import ForceGraph3D from 'react-force-graph-3d'
 import * as THREE from 'three'
-import type { EctoGraph, EctoNode, EctoEdge } from '../lib/ectoscript/graph'
-import { NODE_TYPE_COLORS } from '../lib/ectoscript/graph'
+import type { MiniGraphPayload } from '../engine'
 
 interface Props {
-  graph: EctoGraph
+  payload: MiniGraphPayload | null
   selectedId: string | null
   onSelect: (id: string | null) => void
+}
+
+const NODE_KIND_COLORS: Record<string, string> = {
+  component: '#34d399',
+  element: '#60a5fa',
+  atom: '#facc15',
+  token: '#fb923c',
+  derived: '#a78bfa',
+  styleSheet: '#f472b6',
+  cause: '#22d3ee',
+  effect: '#f87171',
+  repeat: '#fb7185',
+  visibility: '#c084fc',
+  doc: '#94a3b8',
+  ui: '#cbd5e1',
 }
 
 interface GNode {
@@ -23,7 +37,7 @@ interface GLink {
   color: string
 }
 
-export function Graph3DPanel({ graph, selectedId, onSelect }: Props) {
+export function Graph3DPanel({ payload, selectedId, onSelect }: Props) {
   const containerRef = React.useRef<HTMLDivElement>(null)
   const [size, setSize] = React.useState({ w: 480, h: 360 })
   const fgRef = React.useRef<any>(null)
@@ -38,20 +52,24 @@ export function Graph3DPanel({ graph, selectedId, onSelect }: Props) {
   }, [])
 
   const data = React.useMemo(() => {
-    const nodes: GNode[] = graph.nodes.map((n: EctoNode) => ({
-      id: n.id,
-      label: `${n.type} · ${n.label}`,
-      type: n.type,
-      color: NODE_TYPE_COLORS[n.type] ?? '#94a3b8',
-    }))
-    const links: GLink[] = graph.edges.map((e: EctoEdge) => ({
-      source: e.source,
-      target: e.target,
-      type: e.type,
+    if (!payload) return { nodes: [] as GNode[], links: [] as GLink[] }
+    const nodes: GNode[] = (payload.nodes as any[]).map((n) => {
+      const kind = String(n.type ?? '')
+      return {
+        id: String(n.id),
+        label: `${kind} · ${String(n.name ?? n.id)}`,
+        type: kind,
+        color: NODE_KIND_COLORS[kind] ?? '#94a3b8',
+      }
+    })
+    const links: GLink[] = (payload.edges as any[]).map((e) => ({
+      source: String(e.from),
+      target: String(e.to),
+      type: String(e.kind),
       color: 'rgba(148, 163, 184, 0.4)',
     }))
     return { nodes, links }
-  }, [graph])
+  }, [payload])
 
   // Highlight the selected node by inflating its size.
   const nodeThreeObject = React.useCallback(
@@ -115,7 +133,7 @@ export function Graph3DPanel({ graph, selectedId, onSelect }: Props) {
           maxWidth: 260,
         }}
       >
-        {Object.entries(NODE_TYPE_COLORS).map(([k, v]) => (
+        {Object.entries(NODE_KIND_COLORS).map(([k, v]) => (
           <div
             key={k}
             style={{

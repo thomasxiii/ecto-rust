@@ -1,15 +1,14 @@
 import React from 'react'
-import type { EctoGraph } from '../lib/ectoscript/graph'
-import type { ParseError } from '../lib/ectoscript/parser'
+import type { EctoScriptParseError, MiniGraphPayload } from '../engine'
 
 interface Props {
-  graph: EctoGraph
-  errors: ParseError[]
+  payload: MiniGraphPayload | null
+  errors: EctoScriptParseError[]
 }
 
-export function GraphJsonPanel({ graph, errors }: Props) {
+export function GraphJsonPanel({ payload, errors }: Props) {
   const [copied, setCopied] = React.useState(false)
-  const text = JSON.stringify(graph, null, 2)
+  const text = payload ? JSON.stringify(payload, null, 2) : '{}'
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text)
@@ -32,7 +31,8 @@ export function GraphJsonPanel({ graph, errors }: Props) {
         }}
       >
         <span style={{ opacity: 0.6 }}>
-          graph.json — {graph.nodes.length} nodes · {graph.edges.length} edges
+          graph.json — {payload?.nodes.length ?? 0} nodes ·{' '}
+          {payload?.edges.length ?? 0} edges
         </span>
         <button
           onClick={copy}

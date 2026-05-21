@@ -1,12 +1,12 @@
 import React, { useEffect, useRef } from 'react'
 import Editor, { type Monaco, type OnMount } from '@monaco-editor/react'
 import { LANG_ID, THEME_ID, registerEctoScript } from '../lib/ectoscript/monacoLanguage'
-import type { ParseError } from '../lib/ectoscript/parser'
+import type { EctoScriptParseError } from '../engine'
 
 interface Props {
   value: string
   onChange: (v: string) => void
-  errors: ParseError[]
+  errors: EctoScriptParseError[]
 }
 
 export function EctoEditor({ value, onChange, errors }: Props) {

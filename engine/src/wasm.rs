@@ -34,6 +34,23 @@ pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Compile EctoScript source into a MiniRuntime-loadable graph payload.
+/// Returns a JSON string of `{ graph, errors, index }` — the host
+/// inspects `errors` for Monaco markers and feeds `graph` straight
+/// into `MiniRuntime.loadGraph`.
+#[wasm_bindgen(js_name = compileEctoscript)]
+pub fn compile_ectoscript(source: &str) -> Result<String, JsValue> {
+    let result = crate::ectoscript::compile_source(source);
+    to_json(&result)
+}
+
+/// The starter EctoScript shipped with the web playground. Returned as
+/// a plain string so the host can pre-fill the Monaco editor.
+#[wasm_bindgen(js_name = ectoscriptStarter)]
+pub fn ectoscript_starter() -> String {
+    crate::ectoscript::STARTER_ECTOSCRIPT.to_string()
+}
+
 /// Main entry point — wraps an in-memory [`Graph`] and exposes the
 /// engine's full public surface to JS.
 ///
@@ -212,13 +229,13 @@ pub struct MiniRuntime {
 
 #[wasm_bindgen]
 impl MiniRuntime {
-    /// Construct a runtime pre-loaded with the toggle-app graph. The
-    /// fixture lives in `mini_runtime::toggle_app::build_toggle_app`.
+    /// Construct an empty runtime. The host is expected to call
+    /// `loadGraph` (typically with the output of `compileEctoscript`)
+    /// before materializing.
     #[wasm_bindgen(constructor)]
     pub fn new() -> MiniRuntime {
-        let graph = mini_runtime::toggle_app::build_toggle_app();
         MiniRuntime {
-            inner: RefCell::new(mini_runtime::Runtime::new(graph)),
+            inner: RefCell::new(mini_runtime::Runtime::new(mini_runtime::Graph::new())),
         }
     }
 
@@ -241,22 +258,57 @@ impl MiniRuntime {
 
     /// Dispatch an event with a payload (typically a `change` event from an
     /// input — the payload should be a JSON value, e.g. `"\"hello\""`).
+    /// `item_id` identifies the record when the event fires inside a
+    /// `Repeat` expansion; `item_atom_id` is the atom id of the
+    /// iterated list (so list-item effects mutate the right one). Pass
+    /// empty strings for events outside a loop.
     #[wasm_bindgen(js_name = dispatchEvent)]
     pub fn dispatch_event(
         &self,
         element: &str,
         event: &str,
         payload_json: &str,
+        item_id: &str,
+        item_atom_id: &str,
     ) -> Result<String, JsValue> {
         let payload: Option<mini_runtime::Value> = if payload_json.is_empty() {
             None
         } else {
             Some(serde_json::from_str(payload_json).map_err(map_err("invalid payload"))?)
         };
+        let id_opt = if item_id.is_empty() { None } else { Some(item_id) };
+        let atom_opt = if item_atom_id.is_empty() {
+            None
+        } else {
+            Some(item_atom_id)
+        };
         let patches = self
             .inner
             .borrow_mut()
-            .dispatch_event(element, event, payload);
+            .dispatch_event(element, event, payload, id_opt, atom_opt);
+        to_json(&patches)
+    }
+
+    /// Resolve an outstanding `MatchPending` patch. The host calls
+    /// this with the LLM result; the runtime patches the relevant
+    /// record's field and emits AtomChanged + propagation patches.
+    #[wasm_bindgen(js_name = resolveMatch)]
+    pub fn resolve_match(
+        &self,
+        atom_id: &str,
+        record_id: &str,
+        field: &str,
+        value_json: &str,
+    ) -> Result<String, JsValue> {
+        let value: mini_runtime::Value = if value_json.is_empty() {
+            mini_runtime::Value::Null
+        } else {
+            serde_json::from_str(value_json).map_err(map_err("invalid value"))?
+        };
+        let patches = self
+            .inner
+            .borrow_mut()
+            .resolve_match(atom_id, record_id, field, value);
         to_json(&patches)
     }
 

@@ -5,6 +5,8 @@
 import init, {
   Engine as WasmEngine,
   MiniRuntime as WasmMiniRuntime,
+  compileEctoscript as wasmCompileEctoscript,
+  ectoscriptStarter,
   engine_version,
 } from './wasm/ecto_engine'
 
@@ -185,6 +187,11 @@ export interface MiniRenderNode {
   attrs: Record<string, string>
   children: MiniRenderNode[]
   semantic: MiniSemanticAnnotation | null
+  /** Present when this node was rendered inside a Repeat expansion. */
+  itemId?: string | null
+  /** The atom id of the iterated list — hosts pass this to dispatchEvent
+   * so list-item effects know which collection to mutate. */
+  itemAtom?: string | null
 }
 
 export interface MiniEventBinding {
@@ -208,6 +215,15 @@ export type MiniPatch =
   | { type: 'derivedChanged'; node: string; old: MiniValue; new: MiniValue }
   | { type: 'styleChanged'; element: string; property: string; old: MiniValue; new: MiniValue }
   | { type: 'eventHandled'; cause: string; effect: string }
+  | {
+      type: 'matchPending'
+      atom: string
+      recordId: string
+      field: string
+      input: string
+      candidates: MiniValue[]
+      by: string
+    }
 
 export class MiniRuntime {
   private inner: WasmMiniRuntime
@@ -224,10 +240,33 @@ export class MiniRuntime {
   }
 
   /// Dispatch an event with a payload (typically the new value from a
-  /// change event). Pass `undefined` for no payload.
-  dispatchEvent(element: string, event: string, payload?: MiniValue): MiniPatch[] {
+  /// change event). Pass `undefined` for no payload. `itemId` /
+  /// `itemAtom` identify the iterated record and its list atom when
+  /// the event fires inside a for-loop.
+  dispatchEvent(
+    element: string,
+    event: string,
+    payload?: MiniValue,
+    itemId?: string,
+    itemAtom?: string,
+  ): MiniPatch[] {
     const payloadJson = payload === undefined ? '' : JSON.stringify(payload)
-    return JSON.parse(this.inner.dispatchEvent(element, event, payloadJson))
+    const id = itemId ?? ''
+    const atom = itemAtom ?? ''
+    return JSON.parse(
+      this.inner.dispatchEvent(element, event, payloadJson, id, atom),
+    )
+  }
+
+  /// Resolve an outstanding `matchPending` patch with the LLM result.
+  resolveMatch(
+    atomId: string,
+    recordId: string,
+    field: string,
+    value: MiniValue | null,
+  ): MiniPatch[] {
+    const json = value === undefined ? '' : JSON.stringify(value ?? null)
+    return JSON.parse(this.inner.resolveMatch(atomId, recordId, field, json))
   }
 
   /// Replace the runtime's graph with a new payload (e.g. one returned by
@@ -254,6 +293,46 @@ export interface MiniGraphPayload {
   nodes: any[]
   edges: any[]
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// EctoScript: source → MiniRuntime graph via the Rust compiler.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface EctoScriptParseError {
+  message: string
+  line: number
+  col: number
+}
+
+export interface EctoScriptIndex {
+  atoms: Record<string, string>
+  components: Record<string, string>
+  tokens: Record<string, string>
+  derived: Record<string, string>
+  styles: Record<string, string>
+  queries: Record<string, string>
+  rootComponentId: string | null
+}
+
+export interface EctoScriptResult {
+  graph: MiniGraphPayload
+  errors: EctoScriptParseError[]
+  index: EctoScriptIndex
+}
+
+export function compileEctoscript(source: string): EctoScriptResult {
+  return JSON.parse(wasmCompileEctoscript(source))
+}
+
+export function getStarterEctoscript(): string {
+  return ectoscriptStarter()
+}
+
+// Re-export the snapshot type under the runtime-flavored name so
+// EctoStudio + RuntimeView can read it without dragging in unrelated
+// Mini* identifiers.
+export type RuntimeSnapshot = MiniRuntimeSnapshot
+export type RuntimeRenderNode = MiniRenderNode
 
 export interface MiniGenerationResult {
   payload: MiniGraphPayload
