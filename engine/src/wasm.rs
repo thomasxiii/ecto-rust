@@ -15,7 +15,7 @@ use crate::graph::types::{AgentGraphOp, GraphPayload};
 use crate::graph::Graph;
 use crate::importer::{import_project, FileBlob, ImportResult};
 use crate::mutations::{apply_agent_op, apply_mutation, GraphMutation};
-use crate::render::{generate_stylesheet, walk_render_tree};
+use crate::render::{compute_patches, generate_stylesheet, walk_render_tree, RenderPatch};
 use crate::semantic::build_semantic_layer;
 use crate::ui_layer::build_ui_layer;
 use serde::Serialize;
@@ -121,6 +121,31 @@ impl Engine {
         to_json(&events)
     }
 
+    /// Apply a mutation and return both the events and the narrowest
+    /// render patches the host needs to apply. JSON shape:
+    /// `{ events: GraphEvent[], patches: RenderPatch[] }`.
+    ///
+    /// Use this in place of `applyMutation` + a full `walkRenderTree`
+    /// when you want to avoid re-mounting the React tree on every edit.
+    /// If any patch is `{ type: "full" }`, fall back to a complete walk.
+    #[wasm_bindgen(js_name = applyMutationWithPatches)]
+    pub fn apply_mutation_with_patches(&self, mutation_json: &str) -> Result<String, JsValue> {
+        let mutation: GraphMutation = serde_json::from_str(mutation_json).map_err(|e| {
+            let snippet: String = mutation_json.chars().take(120).collect();
+            JsValue::from_str(&format!(
+                "invalid mutation ({e}); received {} bytes: {snippet:?}",
+                mutation_json.len()
+            ))
+        })?;
+        let events = apply_mutation(&mut self.graph.borrow_mut(), &mutation)
+            .map_err(|e| JsValue::from_str(&format!("mutation error: {e}")))?;
+        let patches: Vec<RenderPatch> = compute_patches(&self.graph.borrow(), &mutation);
+        to_json(&MutationWithPatches {
+            events: &events,
+            patches: &patches,
+        })
+    }
+
     /// Apply a single LLM-flat `AgentGraphOp`. Same return shape as
     /// `applyMutation`.
     #[wasm_bindgen(js_name = applyAgentOp)]
@@ -205,6 +230,13 @@ impl Default for Engine {
 struct LayerWire<'a> {
     nodes: &'a [crate::graph::Node],
     edges: &'a [crate::graph::Edge],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MutationWithPatches<'a> {
+    events: &'a [crate::graph::types::GraphEvent],
+    patches: &'a [RenderPatch],
 }
 
 fn to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
@@ -320,6 +352,20 @@ impl MiniRuntime {
         let payload: mini_runtime::graph::GraphPayload =
             serde_json::from_str(payload_json).map_err(map_err("invalid graph payload"))?;
         self.inner.borrow_mut().load_payload(payload);
+        Ok(())
+    }
+
+    /// Re-load a payload while preserving live atom values for atoms
+    /// whose IDs survive in the new payload. Studio uses this on every
+    /// source recompile so form state, list contents, and toggle states
+    /// persist across keystrokes. Tokens, derived values, styles, and
+    /// render-graph nodes are replaced wholesale — only atom *values*
+    /// are merged across.
+    #[wasm_bindgen(js_name = updatePayload)]
+    pub fn update_payload(&self, payload_json: &str) -> Result<(), JsValue> {
+        let payload: mini_runtime::graph::GraphPayload =
+            serde_json::from_str(payload_json).map_err(map_err("invalid graph payload"))?;
+        self.inner.borrow_mut().update_payload(payload);
         Ok(())
     }
 

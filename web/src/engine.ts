@@ -92,6 +92,23 @@ export type Mutation =
   | { type: 'remove_node'; projectId: string; nodeId: string }
   | { type: 'remove_edge'; projectId: string; edgeId: string }
 
+/// Narrow update the engine emits in response to a mutation. The host
+/// uses this to skip a full render-tree walk when the change only
+/// affected a known-narrow slice (e.g. a Style data edit changes CSS
+/// but leaves the tree shape untouched).
+///
+/// A `full` patch is the always-correct fallback: the engine can't yet
+/// narrow this mutation, so the host should re-walk the tree and
+/// regenerate the stylesheet.
+export type RenderPatch =
+  | { type: 'stylesheetReplaced'; css: string; classesByElement: Record<string, string[]> }
+  | { type: 'full' }
+
+export interface MutationWithPatches {
+  events: unknown[]
+  patches: RenderPatch[]
+}
+
 // The Rust WASM surface takes/returns JSON strings rather than JS
 // objects to avoid wasm-bindgen's re-entry check tripping when
 // serde-wasm-bindgen walks JS values while the Engine holds a
@@ -129,6 +146,12 @@ export class Engine {
 
   applyMutation(m: Mutation): unknown[] {
     return JSON.parse(this.inner.applyMutation(toJson(m, 'applyMutation')))
+  }
+
+  applyMutationWithPatches(m: Mutation): MutationWithPatches {
+    return JSON.parse(
+      this.inner.applyMutationWithPatches(toJson(m, 'applyMutationWithPatches')),
+    )
   }
 
   applyAgentOp(projectId: string, op: Record<string, any>): unknown[] {
@@ -273,6 +296,15 @@ export class MiniRuntime {
   /// the LLM mini-app generator).
   loadGraph(payload: MiniGraphPayload): void {
     this.inner.loadGraph(JSON.stringify(payload))
+  }
+
+  /// Reload while preserving live atom values for atoms whose IDs
+  /// survive in the new payload. Studio uses this on every recompile so
+  /// form inputs / toggles / lists don't reset on each keystroke. The
+  /// compiler emits content-stable atom IDs (hashed from qualified
+  /// name) so the merge matches "same" atoms across edits.
+  updatePayload(payload: MiniGraphPayload): void {
+    this.inner.updatePayload(JSON.stringify(payload))
   }
 
   /// Cypher-like text dump of the whole graph + current state.

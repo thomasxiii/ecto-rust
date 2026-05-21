@@ -105,6 +105,19 @@ impl Compiler {
         format!("{prefix}_{}", self.counter)
     }
 
+    /// Deterministic ID derived from a kind prefix + symbol path. Same
+    /// `qname` always hashes to the same ID across recompiles, so the
+    /// runtime can match atoms between old and new graphs to preserve
+    /// their values when the user edits the source. Use this for nodes
+    /// the user names in source (atoms, components, tokens). Anonymous
+    /// nodes (elements, effects, causes) keep counter IDs.
+    fn stable_id(prefix: &str, qname: &str) -> NodeId {
+        let key = format!("{prefix}::{qname}");
+        let a = crate::stable_id::fnv1a32(&key);
+        let b = crate::stable_id::fnv1a32(&format!("{key}:b"));
+        format!("{prefix}_{a}{}", &b[..4])
+    }
+
     fn add_node(&mut self, node: Node) {
         self.nodes.push(node);
     }
@@ -224,7 +237,7 @@ impl Compiler {
 
 impl Compiler {
     fn emit_token(&mut self, t: &TokenDecl) {
-        let id = self.next_id("token");
+        let id = Self::stable_id("token", &t.name);
         let value = literal_to_value(&t.value);
         self.add_node(Node::new(&id, &t.name, NodeData::Token { value }));
         self.tokens.insert(t.name.clone(), id);
@@ -322,16 +335,16 @@ impl Compiler {
     fn emit_model(&mut self, m: &ModelDecl) {
         // Models aren't rendered — they exist purely to host atoms.
         for state in &m.states {
-            let atom_id = self.next_id("atom");
+            let qname = format!("{}.{}", m.name, state.name);
+            let atom_id = Self::stable_id("atom", &qname);
             self.add_node(Node::new(
                 &atom_id,
-                &format!("{}.{}", m.name, state.name),
+                &qname,
                 NodeData::Atom {
                     value: literal_to_value(&state.initial),
                 },
             ));
-            self.atoms_by_qname
-                .insert(format!("{}.{}", m.name, state.name), atom_id);
+            self.atoms_by_qname.insert(qname, atom_id);
         }
         let names: Vec<String> = m.states.iter().map(|s| s.name.clone()).collect();
         self.model_state_names.insert(m.name.clone(), names);
@@ -357,16 +370,16 @@ impl Compiler {
     fn emit_component(&mut self, c: &ComponentDecl) {
         self.component_local.clear();
         for state in &c.states {
-            let atom_id = self.next_id("atom");
+            let qname = format!("{}.{}", c.name, state.name);
+            let atom_id = Self::stable_id("atom", &qname);
             self.add_node(Node::new(
                 &atom_id,
-                &format!("{}.{}", c.name, state.name),
+                &qname,
                 NodeData::Atom {
                     value: literal_to_value(&state.initial),
                 },
             ));
-            self.atoms_by_qname
-                .insert(format!("{}.{}", c.name, state.name), atom_id.clone());
+            self.atoms_by_qname.insert(qname, atom_id.clone());
             self.component_local.insert(state.name.clone(), atom_id);
         }
 

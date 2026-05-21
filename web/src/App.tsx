@@ -253,11 +253,35 @@ function EngineView({
             nodeId: selectedNode.id,
             name: editText,
           }
-    eng.applyMutation(mutation)
-    setRevision((r) => r + 1)
+    const { patches } = eng.applyMutationWithPatches(mutation)
+    applyRenderPatches(patches)
     if (projectId && projectId !== LOCAL_PROJECT_ID) {
       void emitMutation(mutation)
     }
+  }
+
+  // Apply the engine's narrow patches in place of a full refresh. Any
+  // `full` patch bumps `revision`, which kicks `refreshFromEngine`;
+  // narrower patches update just the state they affect, leaving the
+  // render tree object reference untouched so React skips reconciliation
+  // for the previewed subtree and the runtime keeps its state.
+  const applyRenderPatches = (patches: import('./engine').RenderPatch[]) => {
+    let needsFullRefresh = false
+    for (const p of patches) {
+      switch (p.type) {
+        case 'stylesheetReplaced':
+          setCss(p.css)
+          setClasses(p.classesByElement)
+          // Inspector reads from `graph`; the mutated node lives there
+          // too. Pull a fresh payload but skip the render-tree walk.
+          if (engineRef.current) setGraph(engineRef.current.getGraph())
+          break
+        case 'full':
+          needsFullRefresh = true
+          break
+      }
+    }
+    if (needsFullRefresh) setRevision((r) => r + 1)
   }
 
   const buildSemanticLayer = () => {

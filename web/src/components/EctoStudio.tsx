@@ -56,7 +56,12 @@ export function EctoStudio({ onBack }: Props) {
     }
   }, [])
 
-  // Compile-and-load whenever source changes (debounced).
+  // Compile-and-load whenever source changes (debounced). We track
+  // whether this is the very first load so we can call `loadGraph`
+  // (a clean reset) once at startup and `updatePayload` on every
+  // subsequent edit — the latter preserves atom values so form inputs,
+  // toggles, and accumulated lists survive each keystroke.
+  const hasLoadedOnceRef = React.useRef(false)
   React.useEffect(() => {
     if (!ready) return
     const handle = setTimeout(() => {
@@ -64,7 +69,12 @@ export function EctoStudio({ onBack }: Props) {
         const result: EctoScriptResult = compileEctoscript(source)
         setErrors(result.errors)
         if (!runtimeRef.current) return
-        runtimeRef.current.loadGraph(result.graph)
+        if (hasLoadedOnceRef.current) {
+          runtimeRef.current.updatePayload(result.graph)
+        } else {
+          runtimeRef.current.loadGraph(result.graph)
+          hasLoadedOnceRef.current = true
+        }
         setGraphPayload(result.graph)
         const snap = runtimeRef.current.materialize(false)
         setSnapshot(snap)

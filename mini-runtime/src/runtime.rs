@@ -176,6 +176,46 @@ impl Runtime {
         self.prime_caches();
     }
 
+    /// Re-load a payload while preserving live atom values for atoms
+    /// whose IDs survive the new payload. Used by studio: each source
+    /// edit produces a fresh compile, but the user expects form state
+    /// (typed text, toggle states, accumulated lists) to persist across
+    /// keystrokes. The ectoscript compiler emits content-stable atom
+    /// IDs so this merge correctly identifies "same" atoms across
+    /// recompiles. Everything else (tokens, derived, styles, render
+    /// graph) replaces wholesale — those are what the edit *should*
+    /// change.
+    pub fn update_payload(&mut self, payload: GraphPayload) {
+        let preserved: std::collections::HashMap<NodeId, Value> = self
+            .graph
+            .nodes()
+            .filter_map(|n| match &n.data {
+                NodeData::Atom { value } => Some((n.id.clone(), value.clone())),
+                _ => None,
+            })
+            .collect();
+        let mut new_graph = Graph::from_payload(payload);
+        let atom_ids: Vec<NodeId> = new_graph
+            .nodes()
+            .filter_map(|n| {
+                matches!(n.data, NodeData::Atom { .. }).then(|| n.id.clone())
+            })
+            .collect();
+        for id in atom_ids {
+            if let Some(prev) = preserved.get(&id) {
+                if let Some(node) = new_graph.node_mut(&id) {
+                    if let NodeData::Atom { value } = &mut node.data {
+                        *value = prev.clone();
+                    }
+                }
+            }
+        }
+        self.graph = new_graph;
+        self.derived_cache.clear();
+        self.style_cache.clear();
+        self.prime_caches();
+    }
+
     fn prime_caches(&mut self) {
         // Two passes for deriveds — derived-on-derived would require more,
         // but a fixed-point loop covers it. For the apps we generate, two

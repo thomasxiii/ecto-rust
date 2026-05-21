@@ -73,6 +73,117 @@ mod tests {
         assert!(!res.graph.nodes.is_empty());
     }
 
+    /// Editing source above an atom must not shift its ID. The runtime
+    /// uses atom IDs to preserve live state across recompiles — if a
+    /// token-literal edit renumbers downstream atoms, every form input
+    /// resets to its initial value on each keystroke.
+    #[test]
+    fn atom_ids_stable_across_source_edits() {
+        let original = STARTER_ECTOSCRIPT;
+        // Compile once to capture baseline atom IDs.
+        let baseline = compile_source(original);
+        assert!(baseline.errors.is_empty(), "starter must compile");
+        // Edit the source above the atoms: replace any token literal we
+        // know exists in the starter. We do a generic edit — append a
+        // benign new line so positions shift but no names change.
+        let edited = format!("// tweak\n{original}");
+        let edited_res = compile_source(&edited);
+        assert!(
+            edited_res.errors.is_empty(),
+            "edited starter must still compile: {:?}",
+            edited_res.errors,
+        );
+        for (qname, id) in &baseline.index.atoms {
+            let after = edited_res.index.atoms.get(qname);
+            assert_eq!(
+                after,
+                Some(id),
+                "atom {qname} must keep its id across edits (was {id}, got {after:?})",
+            );
+        }
+    }
+
+    /// The studio scenario: user types into a form (atom acquires a
+    /// value), then edits the source above it (recompile). The atom's
+    /// live value must survive the reload — that's the whole point of
+    /// content-stable atom IDs + `update_payload`.
+    #[test]
+    fn update_payload_preserves_atom_values_across_source_edits() {
+        let baseline = compile_source(STARTER_ECTOSCRIPT);
+        assert!(baseline.errors.is_empty());
+        let name_atom = baseline
+            .index
+            .atoms
+            .get("NewProjectForm.name")
+            .expect("starter has NewProjectForm.name")
+            .clone();
+        let mut rt =
+            Runtime::new(mini_runtime::Graph::from_payload(baseline.graph.clone()));
+
+        // Simulate user typing into the form: write the atom via a
+        // dispatched change on its bound input.
+        let snap = rt.materialize(false);
+        let input_id =
+            find_first_input_id(&snap.render_tree).expect("starter has an input");
+        rt.dispatch_event(
+            &input_id,
+            "change",
+            Some(mini_runtime::Value::String("Inbox".into())),
+            None,
+            None,
+        );
+        assert_eq!(
+            rt.atom(&name_atom),
+            Some(mini_runtime::Value::String("Inbox".into())),
+        );
+
+        // Now edit the source (benign comment prepend) and update_payload.
+        let edited = compile_source(&format!("// edit\n{STARTER_ECTOSCRIPT}"));
+        assert!(edited.errors.is_empty(), "edited starter must compile");
+        rt.update_payload(edited.graph);
+
+        // Same atom id should still be there and hold the typed value.
+        assert_eq!(
+            rt.atom(&name_atom),
+            Some(mini_runtime::Value::String("Inbox".into())),
+            "atom value must survive update_payload",
+        );
+    }
+
+    /// Conversely: a token literal edit must actually flow through to
+    /// downstream styles/derived after update_payload — otherwise we'd
+    /// preserve too much and the user's edit wouldn't take effect.
+    #[test]
+    fn update_payload_applies_token_value_changes() {
+        let original = "token tk_main = \"#3b82f6\"\n\ncomponent App\n  render\n    < div\n      text: \"hi\"\n";
+        let edited = "token tk_main = \"#10b981\"\n\ncomponent App\n  render\n    < div\n      text: \"hi\"\n";
+        let r1 = compile_source(original);
+        assert!(r1.errors.is_empty(), "original must compile: {:?}", r1.errors);
+        let mut rt = Runtime::new(mini_runtime::Graph::from_payload(r1.graph));
+        let r2 = compile_source(edited);
+        assert!(r2.errors.is_empty(), "edited must compile: {:?}", r2.errors);
+        rt.update_payload(r2.graph);
+        // The token node's value must reflect the edit (i.e. the merge
+        // didn't preserve the old literal).
+        let new_token_value = rt
+            .graph
+            .nodes()
+            .find_map(|n| match &n.data {
+                mini_runtime::graph::NodeData::Token { value }
+                    if n.name == "tk_main" =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .expect("tk_main must exist after update");
+        assert_eq!(
+            new_token_value,
+            mini_runtime::Value::String("#10b981".into()),
+            "token literal edits must propagate through update_payload",
+        );
+    }
+
     #[test]
     fn starter_loads_into_runtime_and_materializes() {
         let res = compile_source(STARTER_ECTOSCRIPT);

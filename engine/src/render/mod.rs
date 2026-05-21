@@ -5,8 +5,10 @@
 //! React in the browser and SwiftUI on iOS today; the Rust engine
 //! produces it directly so neither host re-implements the walker.
 
+pub mod patch;
 pub mod stylesheet;
 pub mod tree;
 
+pub use patch::{compute_patches, RenderPatch};
 pub use stylesheet::{generate_stylesheet, StylesheetResult};
 pub use tree::{walk_render_tree, RenderTreeNode, RenderTreeKind, StyleDeclaration};
